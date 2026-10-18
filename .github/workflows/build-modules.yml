@@ -3,7 +3,7 @@ name: build-modules
 # 1. Finds Unraid releases (>= MIN_UNRAID) in https://releases.unraid.net/json that are not yet in
 #    configs/unraid-versions.txt, extracts each one's kernel .config and commits it to configs/.
 # 2. Builds uas_arb.ko for every configs/<kernel>.config that has no module yet (or all, if src
-#    changed / rebuild requested) from that kernel's own uas.c + patches/uas-arbiter.patch, and
+#    whose .src source-hash sidecar is missing/stale, or all on request) from that kernel's own uas.c + patches/uas-arbiter.patch, and
 #    publishes uas_arb-<kernel>.ko + .sha256 to the "modules" release, where the plugin downloads it.
 on:
   push:
@@ -86,20 +86,23 @@ jobs:
           REBUILD: ${{ inputs.rebuild }}
         run: |
           set -uo pipefail
-          existing=$(gh release view modules --json assets -q '.assets[].name')
-          changed=no
-          if [ "${{ github.event_name }}" = push ] && git diff --name-only HEAD~1 HEAD | grep -qE '^(patches/|tools/build-for-unraid.sh)'; then changed=yes; fi
+          # every module carries uas_arb-KERNEL.ko.src = hash of the sources it was built from;
+          # (re)build when that is missing or differs from the current sources
+          SRC=$(cat patches/uas-arbiter.patch tools/build-for-unraid.sh | sha256sum | cut -c1-16)
+          echo "source hash: $SRC"
+          base="https://github.com/${{ github.repository }}/releases/download/modules"
           mkdir -p dist; failed=""
           for cfg in configs/*.config; do
             kr=$(basename "$cfg" .config); asset="uas_arb-$kr.ko"
-            if echo "$existing" | grep -qx "$asset" && [ "$changed" = no ] && [ "${REBUILD:-false}" != true ]; then
-              echo "== $kr: already built"; continue
+            have=$(curl -fsSL "$base/$asset.src" 2>/dev/null || true)
+            if [ "$have" = "$SRC" ] && [ "${REBUILD:-false}" != true ]; then
+              echo "== $kr: up to date ($SRC)"; continue
             fi
             echo "== building $kr"
             if WORK="$RUNNER_TEMP/build-$kr" tools/build-for-unraid.sh "$cfg"; then
               ko="$RUNNER_TEMP/build-$kr/mod/uas_arb.ko"
               if [ -f "$ko" ] && [ "$(modinfo -F vermagic "$ko" | cut -d' ' -f1)" = "$kr" ]; then
-                cp "$ko" "dist/$asset"; (cd dist && sha256sum "$asset" > "$asset.sha256")
+                cp "$ko" "dist/$asset"; (cd dist && sha256sum "$asset" > "$asset.sha256"); echo "$SRC" > "dist/$asset.src"
               else failed="$failed $kr"; fi
             else failed="$failed $kr"; fi
             rm -rf "$RUNNER_TEMP/build-$kr"
