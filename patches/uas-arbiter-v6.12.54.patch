@@ -1,0 +1,329 @@
+diff -ruN a/drivers/usb/storage/uas-detect.h b/drivers/usb/storage/uas-detect.h
+--- a/drivers/usb/storage/uas-detect.h	2026-10-18 15:13:46.950264513 -0400
++++ b/drivers/usb/storage/uas-detect.h	2026-10-18 15:13:46.953209061 -0400
+@@ -114,7 +114,7 @@
+ 
+ 	/* All Seagate disk enclosures have broken ATA pass-through support */
+ 	if (le16_to_cpu(udev->descriptor.idVendor) == 0x0bc2)
+-		flags |= US_FL_NO_ATA_1X;
++		flags |= (US_FL_NO_ATA_1X | US_FL_IGNORE_UAS); /* limetech - bind none of them to uas driver */
+ 
+ 	/*
+ 	 * RTL9210-based enclosure from HIKSEMI, MD202 reportedly have issues
+diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
+--- a/drivers/usb/storage/uas.c	2026-10-18 15:13:46.948141038 -0400
++++ b/drivers/usb/storage/uas.c	2026-10-18 15:13:46.951730109 -0400
+@@ -6,6 +6,13 @@
+  * Copyright Hans de Goede <hdegoede@redhat.com> for Red Hat, Inc. 2013 - 2016
+  * Copyright Matthew Wilcox for Intel Corp, 2010
+  * Copyright Sarah Sharp for Intel Corp, 2010
++ *
++ * MODIFIED 2026-10 (uas_arb): adds a device arbiter that caps how many UAS devices may have
++ * commands in flight at once (module params arb_max, arb_slice_ms), with FIFO turn-taking and
++ * immediate wake-up of waiting devices. Workaround for the Sabrent DS-SC5B (2x VIA VL822 +
++ * 5x ASMedia ASM235CM), whose hub cascade loses UAS data-ready notifications when 4+ bays are busy.
++ * Built as module "uas_arb" / usb driver "uas_arb" so it can run beside a built-in uas.
++ * See https://github.com/davilaa/ds-sc5b-uas-arbiter
+  */
+ 
+ #include <linux/blkdev.h>
+@@ -47,6 +54,11 @@
+ 	spinlock_t lock;
+ 	struct work_struct work;
+ 	struct work_struct scan_work;      /* for async scanning */
++	/* arbiter: cap concurrently active devices (DS-SC5B upstream-hub ERDY loss workaround) */
++	struct list_head arb_node;
++	unsigned arb_listed:1, arb_token:1, arb_draining:1;
++	unsigned long arb_turn_start, arb_last_release, arb_cool_until, arb_last_want;
++	u64 arb_seq;	/* FIFO position while waiting, 0 = not waiting */
+ };
+ 
+ enum {
+@@ -82,6 +94,183 @@
+ static void uas_log_cmd_state(struct scsi_cmnd *cmnd, const char *prefix,
+ 				int status);
+ 
++static int arb_max = 3;
++module_param(arb_max, int, 0644);
++MODULE_PARM_DESC(arb_max, "max UAS devices with commands in flight at once (0 = unlimited)");
++static int arb_slice_ms = 20;
++module_param(arb_slice_ms, int, 0644);
++MODULE_PARM_DESC(arb_slice_ms, "turn length in ms when other devices are waiting");
++static unsigned long arb_grants, arb_denies;
++module_param(arb_grants, ulong, 0444);
++module_param(arb_denies, ulong, 0444);
++static DEFINE_SPINLOCK(arb_lock);
++static LIST_HEAD(arb_devs);
++static int arb_active;
++static u64 arb_seq_next;
++
++static int arb_inflight(struct uas_dev_info *devinfo)
++{
++	int i, n = 0;
++
++	for (i = 0; i < devinfo->qdepth; i++)
++		if (devinfo->cmnd[i])
++			n++;
++	return n;
++}
++
++/* arb_lock held */
++static int arb_waiters_other(struct uas_dev_info *me)
++{
++	struct uas_dev_info *d;
++	int n = 0;
++
++	list_for_each_entry(d, &arb_devs, arb_node)
++		if (d != me && !d->arb_token &&
++		    time_before(jiffies, d->arb_last_want + msecs_to_jiffies(20)))
++			n++;
++	return n;
++}
++
++/* arb_lock held: true if a still-waiting device is ahead of me in line */
++static bool arb_someone_ahead(struct uas_dev_info *me)
++{
++	struct uas_dev_info *d;
++
++	list_for_each_entry(d, &arb_devs, arb_node)
++		if (d != me && !d->arb_token && d->arb_seq &&
++		    time_before(jiffies, d->arb_last_want + msecs_to_jiffies(20)) &&
++		    (!me->arb_seq || d->arb_seq < me->arb_seq))
++			return true;
++	return false;
++}
++
++static void arb_kick_fn(struct work_struct *work);
++static DECLARE_WORK(arb_kick_work, arb_kick_fn);
++static unsigned long arb_kicks;
++module_param(arb_kicks, ulong, 0444);
++
++/* wake waiting devices right away instead of waiting for the SCSI requeue timer */
++static void arb_kick_fn(struct work_struct *work)
++{
++	struct Scsi_Host *hosts[16];
++	struct uas_dev_info *d;
++	struct scsi_device *sdev;
++	unsigned long flags;
++	int i, n = 0;
++
++	spin_lock_irqsave(&arb_lock, flags);
++	list_for_each_entry(d, &arb_devs, arb_node) {
++		struct Scsi_Host *sh;
++
++		if (d->arb_token || !d->arb_seq || n >= ARRAY_SIZE(hosts))
++			continue;
++		sh = (struct Scsi_Host *)((char *)d - offsetof(struct Scsi_Host, hostdata));
++		if (scsi_host_get(sh))
++			hosts[n++] = sh;
++	}
++	spin_unlock_irqrestore(&arb_lock, flags);
++	for (i = 0; i < n; i++) {
++		shost_for_each_device(sdev, hosts[i])
++			blk_mq_run_hw_queues(sdev->request_queue, true);
++		scsi_host_put(hosts[i]);
++	}
++	arb_kicks++;
++}
++
++/* arb_lock held */
++static void arb_do_release(struct uas_dev_info *devinfo)
++{
++	if (!devinfo->arb_token)
++		return;
++	devinfo->arb_token = 0;
++	arb_active--;
++	devinfo->arb_last_release = jiffies;
++	if (devinfo->arb_draining)
++		devinfo->arb_seq = ++arb_seq_next;	/* back of the line */
++	devinfo->arb_draining = 0;
++	queue_work(system_highpri_wq, &arb_kick_work);
++}
++
++/* devinfo->lock held; returns true if the device may issue a new command */
++static bool arb_acquire(struct uas_dev_info *devinfo)
++{
++	unsigned long flags, now = jiffies;
++	unsigned long slice = msecs_to_jiffies(arb_slice_ms);
++	bool ok = false;
++
++	if (arb_max <= 0 && !devinfo->arb_token)
++		return true;
++	spin_lock_irqsave(&arb_lock, flags);
++	if (!devinfo->arb_listed) {
++		list_add_tail(&devinfo->arb_node, &arb_devs);
++		devinfo->arb_listed = 1;
++	}
++	if (devinfo->arb_token) {
++		if (!devinfo->arb_draining &&
++		    time_after(now, devinfo->arb_turn_start + slice) &&
++		    arb_waiters_other(devinfo))
++			devinfo->arb_draining = 1;
++		if (!devinfo->arb_draining)
++			ok = true;
++		else if (arb_inflight(devinfo) == 0)
++			arb_do_release(devinfo);
++	} else {
++		devinfo->arb_last_want = now;
++		if (arb_max > 0 && arb_active >= arb_max) {
++			if (!devinfo->arb_seq)
++				devinfo->arb_seq = ++arb_seq_next;
++			goto out;
++		}
++		if (arb_someone_ahead(devinfo)) {
++			if (!devinfo->arb_seq)
++				devinfo->arb_seq = ++arb_seq_next;
++			goto out;
++		}
++		devinfo->arb_seq = 0;
++		devinfo->arb_token = 1;
++		devinfo->arb_draining = 0;
++		arb_active++;
++		/* short idle gaps continue the same turn */
++		if (time_after(now, devinfo->arb_last_release + msecs_to_jiffies(5)) ||
++		    time_after(now, devinfo->arb_turn_start + 4 * slice))
++			devinfo->arb_turn_start = now;
++		ok = true;
++	}
++out:
++	if (ok)
++		arb_grants++;
++	else
++		arb_denies++;
++	spin_unlock_irqrestore(&arb_lock, flags);
++	return ok;
++}
++
++/* devinfo->lock held; call after a cmnd[] slot was cleared */
++static void arb_maybe_release(struct uas_dev_info *devinfo)
++{
++	unsigned long flags;
++
++	if (!devinfo->arb_token || arb_inflight(devinfo))
++		return;
++	spin_lock_irqsave(&arb_lock, flags);
++	arb_do_release(devinfo);
++	spin_unlock_irqrestore(&arb_lock, flags);
++}
++
++static void arb_unlist(struct uas_dev_info *devinfo)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&arb_lock, flags);
++	arb_do_release(devinfo);
++	if (devinfo->arb_listed) {
++		list_del(&devinfo->arb_node);
++		devinfo->arb_listed = 0;
++	}
++	spin_unlock_irqrestore(&arb_lock, flags);
++}
++
++
+ /*
+  * This driver needs its own workqueue, as we need to control memory allocation.
+  *
+@@ -254,6 +443,7 @@
+ 			      COMMAND_ABORTED))
+ 		return -EBUSY;
+ 	devinfo->cmnd[cmdinfo->uas_tag - 1] = NULL;
++	arb_maybe_release(devinfo);
+ 	uas_free_unsubmitted_urbs(cmnd);
+ 	scsi_done(cmnd);
+ 	return 0;
+@@ -660,12 +850,18 @@
+ 		goto zombie;
+ 	}
+ 
++	if (!arb_acquire(devinfo)) {
++		spin_unlock_irqrestore(&devinfo->lock, flags);
++		return SCSI_MLQUEUE_DEVICE_BUSY;
++	}
++
+ 	/* Find a free uas-tag */
+ 	for (idx = 0; idx < devinfo->qdepth; idx++) {
+ 		if (!devinfo->cmnd[idx])
+ 			break;
+ 	}
+ 	if (idx == devinfo->qdepth) {
++		arb_maybe_release(devinfo);
+ 		spin_unlock_irqrestore(&devinfo->lock, flags);
+ 		return SCSI_MLQUEUE_DEVICE_BUSY;
+ 	}
+@@ -705,6 +901,7 @@
+ 	if (err) {
+ 		/* If we did nothing, give up now */
+ 		if (cmdinfo->state & SUBMIT_STATUS_URB) {
++			arb_maybe_release(devinfo);
+ 			spin_unlock_irqrestore(&devinfo->lock, flags);
+ 			return SCSI_MLQUEUE_DEVICE_BUSY;
+ 		}
+@@ -713,6 +910,7 @@
+ 
+ 	devinfo->cmnd[idx] = cmnd;
+ zombie:
++	arb_maybe_release(devinfo);
+ 	spin_unlock_irqrestore(&devinfo->lock, flags);
+ 	return 0;
+ }
+@@ -741,6 +939,7 @@
+ 
+ 	/* Drop all refs to this cmnd, kill data urbs to break their ref */
+ 	devinfo->cmnd[cmdinfo->uas_tag - 1] = NULL;
++	arb_maybe_release(devinfo);
+ 	if (cmdinfo->state & DATA_IN_URB_INFLIGHT)
+ 		data_in_urb = usb_get_urb(cmdinfo->data_in_urb);
+ 	if (cmdinfo->state & DATA_OUT_URB_INFLIGHT)
+@@ -829,6 +1028,8 @@
+ 	sdev->sdev_bflags |= BLIST_SKIP_IO_HINTS;
+ 
+ 	sdev->hostdata = devinfo;
++	/* arbiter: retry a deferred command after one requeue cycle, not three */
++	sdev->max_device_blocked = 1;
+ 	return 0;
+ }
+ 
+@@ -902,7 +1103,7 @@
+ 
+ static const struct scsi_host_template uas_host_template = {
+ 	.module = THIS_MODULE,
+-	.name = "uas",
++	.name = "uas_arb",
+ 	.queuecommand = uas_queuecommand,
+ 	.target_alloc = uas_target_alloc,
+ 	.slave_alloc = uas_slave_alloc,
+@@ -1029,6 +1230,9 @@
+ 	init_usb_anchor(&devinfo->sense_urbs);
+ 	init_usb_anchor(&devinfo->data_urbs);
+ 	spin_lock_init(&devinfo->lock);
++	INIT_LIST_HEAD(&devinfo->arb_node);
++	devinfo->arb_listed = devinfo->arb_token = devinfo->arb_draining = 0;
++	devinfo->arb_seq = 0;
+ 	INIT_WORK(&devinfo->work, uas_do_work);
+ 	INIT_WORK(&devinfo->scan_work, uas_scan_work);
+ 
+@@ -1216,6 +1420,7 @@
+ 	usb_kill_anchored_urbs(&devinfo->sense_urbs);
+ 	usb_kill_anchored_urbs(&devinfo->data_urbs);
+ 	uas_zap_pending(devinfo, DID_NO_CONNECT);
++	arb_unlist(devinfo);
+ 
+ 	/*
+ 	 * Prevent SCSI scanning (if it hasn't started yet)
+@@ -1249,7 +1454,7 @@
+ }
+ 
+ static struct usb_driver uas_driver = {
+-	.name = "uas",
++	.name = "uas_arb",
+ 	.probe = uas_probe,
+ 	.disconnect = uas_disconnect,
+ 	.pre_reset = uas_pre_reset,
+@@ -1281,6 +1486,7 @@
+ static void __exit uas_exit(void)
+ {
+ 	usb_deregister(&uas_driver);
++	cancel_work_sync(&arb_kick_work);
+ 	destroy_workqueue(workqueue);
+ }
+ 

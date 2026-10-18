@@ -1,0 +1,2 @@
+# re-attach DS-SC5B bridges to uas_arb if the built-in uas driver claims them (e.g. after re-plug)
+ACTION=="bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", DRIVER=="uas", ATTRS{idVendor}=="174c", ATTRS{idProduct}=="55aa", RUN+="/bin/bash /boot/config/uas_arb/rebind.sh %k"

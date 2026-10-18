@@ -1,0 +1,4 @@
+# Optional companion: 5 s SCSI command timeout for the DS-SC5B bridges (174c:55aa).
+# Not needed when uas_arb is active, but it shortens recovery if the stock uas driver is in use
+# (e.g. after an Unraid upgrade before uas_arb is rebuilt).
+ACTION=="add|change", SUBSYSTEM=="scsi", ENV{DEVTYPE}=="scsi_device", ATTRS{idVendor}=="174c", ATTRS{idProduct}=="55aa", ATTR{timeout}="5"
