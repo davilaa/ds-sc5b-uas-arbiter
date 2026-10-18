@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "uas-arb">
 <!ENTITY author    "davilaa">
-<!ENTITY version   "2026.10.18.1">
+<!ENTITY version   "2026.10.18.2">
 <!ENTITY repo      "davilaa/ds-sc5b-uas-arbiter">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/&repo;/main">
 <!ENTITY pluginURL "&gitURL;/plugin/&name;.plg">
@@ -16,9 +16,8 @@
 
 <CHANGES>
 ###&version;
-- Fix: plugin updates now replace the previous version's files
-- Recognise the DS-SC5B when it falls back to USB 2 (VL822 USB2 hub 2109:2822)
-- Warn (log, notification, status) when the enclosure is not on a USB 3 link
+- Fix: re-connected bridges are moved to uas_arb (udev 'add' rule, rebind runs outside the udev event)
+- Updates replace the previous version's files; USB 2 fallback detection and warning
 </CHANGES>
 
 <!-- remove files of a previous version first: the plugin manager skips files that already exist -->
@@ -48,7 +47,8 @@ MATCH="dssc5b"
 #                          (run by the plugin at install/boot, before the array starts)
 #   uas-arb apply          apply settings from the plugin config (called by the settings page)
 #   uas-arb stop           arbiter off; if the array is stopped, give the drives back to stock uas and unload
-#   uas-arb rebind [IFACE] move matching bridge interfaces from uas to uas_arb (udev / manual)
+#   uas-arb rebind [IFACE] move matching bridge interfaces from uas to uas_arb (manual)
+#   uas-arb rebind-later IFACE   same, after 3 s (used by the udev rule)
 #   uas-arb status         plain-text status
 #
 # Safety rule: drives are never moved between drivers while the array is started, because that would
@@ -124,7 +124,9 @@ fetch_module() {
 }
 
 install_rule() {
-  echo "ACTION==\"bind\", SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_interface\", DRIVER==\"uas\", ATTRS{idVendor}==\"174c\", ATTRS{idProduct}==\"55aa\", RUN+=\"$SELF rebind %k\"" > $RULE
+  # the rebind must run outside the udev event (unbinding from inside the bind event doesn't work)
+  # triggers on "add" (Unraid's udev doesn't deliver "bind" events to rules); rebind-later waits for uas to claim it
+  echo "ACTION==\"add\", SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_interface\", ATTRS{idVendor}==\"174c\", ATTRS{idProduct}==\"55aa\", RUN+=\"/bin/sh -c '/usr/bin/setsid $SELF rebind-later %k </dev/null >/dev/null 2>&1 &'\"" > $RULE
   udevadm control --reload
 }
 
@@ -224,6 +226,8 @@ case "$1" in
   apply) apply ;;
   stop) stop ;;
   rebind) rebind "$2" ;;
+  # udev, after a (re)connect: a re-enumerated bridge is a new device, so moving it is safe even with the array started
+  rebind-later) sleep 3; log "udev: $2 (re)connected, moving it to uas_arb if needed"; rebind "$2" ;;
   status) status ;;
   *) echo "usage: $0 {start|apply|stop|rebind [iface]|status}"; exit 1 ;;
 esac

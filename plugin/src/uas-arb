@@ -5,7 +5,8 @@
 #                          (run by the plugin at install/boot, before the array starts)
 #   uas-arb apply          apply settings from the plugin config (called by the settings page)
 #   uas-arb stop           arbiter off; if the array is stopped, give the drives back to stock uas and unload
-#   uas-arb rebind [IFACE] move matching bridge interfaces from uas to uas_arb (udev / manual)
+#   uas-arb rebind [IFACE] move matching bridge interfaces from uas to uas_arb (manual)
+#   uas-arb rebind-later IFACE   same, after 3 s (used by the udev rule)
 #   uas-arb status         plain-text status
 #
 # Safety rule: drives are never moved between drivers while the array is started, because that would
@@ -81,7 +82,9 @@ fetch_module() {
 }
 
 install_rule() {
-  echo "ACTION==\"bind\", SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_interface\", DRIVER==\"uas\", ATTRS{idVendor}==\"174c\", ATTRS{idProduct}==\"55aa\", RUN+=\"$SELF rebind %k\"" > $RULE
+  # the rebind must run outside the udev event (unbinding from inside the bind event doesn't work)
+  # triggers on "add" (Unraid's udev doesn't deliver "bind" events to rules); rebind-later waits for uas to claim it
+  echo "ACTION==\"add\", SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_interface\", ATTRS{idVendor}==\"174c\", ATTRS{idProduct}==\"55aa\", RUN+=\"/bin/sh -c '/usr/bin/setsid $SELF rebind-later %k </dev/null >/dev/null 2>&1 &'\"" > $RULE
   udevadm control --reload
 }
 
@@ -181,6 +184,8 @@ case "$1" in
   apply) apply ;;
   stop) stop ;;
   rebind) rebind "$2" ;;
+  # udev, after a (re)connect: a re-enumerated bridge is a new device, so moving it is safe even with the array started
+  rebind-later) sleep 3; log "udev: $2 (re)connected, moving it to uas_arb if needed"; rebind "$2" ;;
   status) status ;;
   *) echo "usage: $0 {start|apply|stop|rebind [iface]|status}"; exit 1 ;;
 esac
