@@ -18,7 +18,7 @@ Details, test results and source: [github.com/davilaa/ds-sc5b-uas-arbiter](https
 
 <?if ($sync < 50 || $stripes < 4096):?>
 <p style="color:#e68a00"><i class="fa fa-warning"></i> Parity checks will be slow with the arbiter unless you raise <b>Settings → Disk Settings</b>:
-<b>md_sync_limit</b> = 80 (now <?=$sync?>) and <b>md_num_stripes</b> = 8192 (now <?=$stripes?>).</p>
+<b>md_sync_limit</b> = 80 (now <?=$sync?>) and <b>md_num_stripes</b> = 32768, or at least 8192 (now <?=$stripes?>).</p>
 <?endif;?>
 
 <form markdown="1" method="POST" action="/update.php" target="progressFrame">

@@ -101,7 +101,17 @@ Module parameters (all writable at runtime under `/sys/module/uas_arb/parameters
 | v3 + 2 MB commands (`arb_max_sectors=4096`) | 171 MB/s | 894 MB/s |
 | v3 + 2 MB, **10-minute soak** | 158 MB/s | 859 MB/s, **0 resets** |
 
-A parity check runs at the slowest bay's pace, so v3 should give ~10% more parity throughput (to be confirmed on a full Unraid check).
+**v3 on a real Unraid parity check** (Unraid 7.2.2, non-correcting, start of the disks, nothing else using the array):
+
+| Driver / setting | Parity speed |
+|---|---|
+| v2 (any 3 devices), `md_num_stripes=8192` | 149 MB/s |
+| v3 (weighted + 2 MB commands), `md_num_stripes=8192` | 152-158 MB/s (+3-5%) |
+| v3, `md_num_stripes=16384` | 158 MB/s |
+| v3, `md_num_stripes=32768` | **162 MB/s (+9% vs v2)** |
+| v3, `arb_slice_ms` 50 / 100 / 200 | no measurable difference |
+
+0 aborts, 0 resets, 0 I/O errors throughout. The parity engine reads all disks in lockstep and waits for the slowest, so the fio gain (+11% for the slowest bay) only partly carries over; a deeper stripe pool recovers some of it.
 
 ### Important: raise Unraid's parity pipeline tunables
 
@@ -110,7 +120,7 @@ Unraid's parity engine keeps only a few reads queued per disk by default, so eve
 | Tunable | Default | Recommended | Parity speed (with arbiter, `arb_slice_ms=100`) |
 |---|---|---|---|
 | `md_sync_limit` | 5 | **80** | 31 MB/s → 77 MB/s |
-| `md_num_stripes` | 1280 | **8192** (~130 MB RAM) | → 127 MB/s (149 MB/s idle) |
+| `md_num_stripes` | 1280 | **32768** (~600 MB RAM while a check runs; 8192 = ~130 MB) | → 127 MB/s with 8192 (149 idle); v3 + 32768: 162 MB/s idle |
 
 A high `md_sync_limit` gives parity checks priority over normal array I/O while they run.
 
@@ -145,7 +155,7 @@ Don't forget the [parity tunables](#important-raise-unraids-parity-pipeline-tuna
    sha256sum /boot/config/uas_arb/uas_arb.ko   # compare with prebuilt/6.12.54-Unraid/SHA256SUMS
    ```
 3. Back up `/boot/config/go`, then add the contents of [`unraid/go-snippet.sh`](unraid/go-snippet.sh) **above** the `/usr/local/sbin/emhttp` line.
-4. Set `md_sync_limit=80` and `md_num_stripes=8192` (Settings → Disk Settings).
+4. Set `md_sync_limit=80` and `md_num_stripes=32768` (or 8192 if RAM is tight) in Settings → Disk Settings.
 5. Reboot. Check:
    ```
    grep uas_arb /var/log/syslog          # "rebound … to uas_arb", "loaded"

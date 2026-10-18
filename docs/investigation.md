@@ -116,3 +116,19 @@ The stall *rate* is independent of queue depth; only the number of aborted comma
   | idle system (no containers), recommended settings | **149** |
 
 * v1 → v2: v2 wakes waiting devices immediately on release and sets `max_device_blocked=1`. On its own that didn't raise parity speed (Unraid's shallow sync pipeline was the limit), but it makes handoffs cheap once the tunables are raised.
+
+## 7. v3 (weighted arbiter) on a real Unraid parity check
+
+Unraid 7.2.2, non-correcting check, measured over 60-90 s windows near the start of the disks, nothing else
+using the array, `md_sync_limit=80`, `arb_max=4 arb_upstream_weight=2 arb_max_sectors=4096`:
+
+| Setting | MB/s |
+|---|---|
+| v2 for reference (`arb_max=3`, stripes 8192, slice 100) | 149 |
+| v3, stripes 8192, slice 100 | 157 / 154 / 152 / 153 / 158 / 154 |
+| v3, slice 50 | 155 |
+| v3, slice 200 | 154 |
+| v3, stripes 16384 | 158 |
+| v3, stripes 32768 | 162 (+~600 MB RAM used) |
+
+Turn length doesn't matter for the lockstep parity engine. A deeper stripe pool helps a little. 0 aborts/resets.
