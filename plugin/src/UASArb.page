@@ -34,17 +34,33 @@ Enable arbiter:
 
 > **No** sets the arbiter to unlimited immediately. Drives stay bound to `uas_arb` until the next boot.
 
-Max drives active at once (arb_max):
-: <select name="ARB_MAX">
-  <?for ($n=1; $n<=5; $n++):?><?=mk_option($cfg['ARB_MAX'], "$n", "$n".($n==3?" (recommended for DS-SC5B)":""))?><?endfor;?>
+Activity limit (arb_max):
+: <select name="ARB_LIMIT">
+  <?for ($n=1; $n<=6; $n++):?><?=mk_option($cfg['ARB_LIMIT'], "$n", "$n".($n==4?" (recommended for DS-SC5B)":""))?><?endfor;?>
   </select>
 
-> On the DS-SC5B, 4 or more busy bays trigger the stalls; 3 is the tested safe maximum.
+> Total "weight" of drives allowed to have commands in flight at once. Each bay behind the second hub weighs 1, bay 1 weighs the value below.
+> On the DS-SC5B, bay 1 plus 3 busy bays behind the second hub stalls; limit 4 with bay-1 weight 2 never allows that.
+
+Bay 1 weight (arb_upstream_weight):
+: <select name="UPSTREAM_WEIGHT">
+  <?=mk_option($cfg['UPSTREAM_WEIGHT'], "2", "2 (recommended)")?>
+  <?=mk_option($cfg['UPSTREAM_WEIGHT'], "1", "1 (all bays equal; use limit 3)")?>
+  </select>
 
 Turn length in ms (arb_slice_ms):
 : <input type="number" name="ARB_SLICE_MS" min="5" max="1000" value="<?=htmlspecialchars($cfg['ARB_SLICE_MS'])?>" class="narrow">
 
 > How long a drive may keep its slot while others are waiting. 100 gave the best Unraid parity speed.
+
+Max command size:
+: <select name="MAX_SECTORS">
+  <?=mk_option($cfg['MAX_SECTORS'], "4096", "2 MB (recommended)")?>
+  <?=mk_option($cfg['MAX_SECTORS'], "2048", "1 MB")?>
+  <?=mk_option($cfg['MAX_SECTORS'], "0", "512 KB (kernel default)")?>
+  </select>
+
+> Takes effect at the next boot.
 
 Which bridges to manage:
 : <select name="MATCH">

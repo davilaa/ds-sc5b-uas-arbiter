@@ -8,8 +8,8 @@
  * Copyright Sarah Sharp for Intel Corp, 2010
  *
  * MODIFIED 2026-10 (uas_arb): adds a device arbiter that caps how many UAS devices may have
- * commands in flight at once (module params arb_max, arb_slice_ms), with FIFO turn-taking and
- * immediate wake-up of waiting devices. Workaround for the Sabrent DS-SC5B (2x VIA VL822 +
+ * commands in flight at once (module params arb_max, arb_upstream_weight, arb_slice_ms), with
+ * weighted FIFO turn-taking and immediate wake-up of waiting devices. Workaround for the Sabrent DS-SC5B (2x VIA VL822 +
  * 5x ASMedia ASM235CM), whose hub cascade loses UAS data-ready notifications when 4+ bays are busy.
  * Built as module "uas_arb" / usb driver "uas_arb" so it can run beside a built-in uas.
  * See https://github.com/davilaa/ds-sc5b-uas-arbiter
@@ -59,6 +59,7 @@ struct uas_dev_info {
 	unsigned arb_listed:1, arb_token:1, arb_draining:1;
 	unsigned long arb_turn_start, arb_last_release, arb_cool_until, arb_last_want;
 	u64 arb_seq;	/* FIFO position while waiting, 0 = not waiting */
+	int arb_weight_held;	/* weight charged while holding a slot */
 };
 
 enum {
@@ -94,9 +95,16 @@ static void uas_free_streams(struct uas_dev_info *devinfo);
 static void uas_log_cmd_state(struct scsi_cmnd *cmnd, const char *prefix,
 				int status);
 
-static int arb_max = 3;
+static int arb_max = 4;
 module_param(arb_max, int, 0644);
-MODULE_PARM_DESC(arb_max, "max UAS devices with commands in flight at once (0 = unlimited)");
+MODULE_PARM_DESC(arb_max, "max total weight of UAS devices with commands in flight at once (0 = unlimited)");
+static int arb_upstream_weight = 2;
+module_param(arb_upstream_weight, int, 0644);
+MODULE_PARM_DESC(arb_upstream_weight, "weight of a device that sits higher in the hub tree than other managed devices "
+		 "(DS-SC5B bay 1); other devices weigh 1. Use 1 with arb_max=3 for the v2 'any 3 devices' rule");
+static int arb_max_sectors;
+module_param(arb_max_sectors, int, 0444);
+MODULE_PARM_DESC(arb_max_sectors, "max 512-byte sectors per command, applied when a device is probed (0 = SCSI default)");
 static int arb_slice_ms = 20;
 module_param(arb_slice_ms, int, 0644);
 MODULE_PARM_DESC(arb_slice_ms, "turn length in ms when other devices are waiting");
@@ -105,7 +113,7 @@ module_param(arb_grants, ulong, 0444);
 module_param(arb_denies, ulong, 0444);
 static DEFINE_SPINLOCK(arb_lock);
 static LIST_HEAD(arb_devs);
-static int arb_active;
+static int arb_weight_used;	/* sum of arb_weight_held over token holders */
 static u64 arb_seq_next;
 
 static int arb_inflight(struct uas_dev_info *devinfo)
@@ -129,6 +137,27 @@ static int arb_waiters_other(struct uas_dev_info *me)
 		    time_before(jiffies, d->arb_last_want + msecs_to_jiffies(20)))
 			n++;
 	return n;
+}
+
+/*
+ * arb_lock held: weight of a device. On the DS-SC5B the bay on the first hub (shallower in the
+ * tree) together with 3+ busy bays behind the cascaded hub is the failing combination, so the
+ * shallower device weighs arb_upstream_weight and the cascaded ones 1 (limit arb_max = 4).
+ */
+static int arb_weight(struct uas_dev_info *me)
+{
+	struct uas_dev_info *d;
+	int w = 1;
+
+	if (arb_upstream_weight > 1)
+		list_for_each_entry(d, &arb_devs, arb_node)
+			if (d != me && d->udev->level > me->udev->level) {
+				w = arb_upstream_weight;
+				break;
+			}
+	if (arb_max > 0 && w > arb_max)
+		w = arb_max;	/* never let one device wait forever */
+	return w;
 }
 
 /* arb_lock held: true if a still-waiting device is ahead of me in line */
@@ -183,7 +212,8 @@ static void arb_do_release(struct uas_dev_info *devinfo)
 	if (!devinfo->arb_token)
 		return;
 	devinfo->arb_token = 0;
-	arb_active--;
+	arb_weight_used -= devinfo->arb_weight_held;
+	devinfo->arb_weight_held = 0;
 	devinfo->arb_last_release = jiffies;
 	if (devinfo->arb_draining)
 		devinfo->arb_seq = ++arb_seq_next;	/* back of the line */
@@ -215,8 +245,10 @@ static bool arb_acquire(struct uas_dev_info *devinfo)
 		else if (arb_inflight(devinfo) == 0)
 			arb_do_release(devinfo);
 	} else {
+		int w = arb_weight(devinfo);
+
 		devinfo->arb_last_want = now;
-		if (arb_max > 0 && arb_active >= arb_max) {
+		if (arb_max > 0 && arb_weight_used + w > arb_max) {
 			if (!devinfo->arb_seq)
 				devinfo->arb_seq = ++arb_seq_next;
 			goto out;
@@ -229,7 +261,8 @@ static bool arb_acquire(struct uas_dev_info *devinfo)
 		devinfo->arb_seq = 0;
 		devinfo->arb_token = 1;
 		devinfo->arb_draining = 0;
-		arb_active++;
+		devinfo->arb_weight_held = w;
+		arb_weight_used += w;
 		/* short idle gaps continue the same turn */
 		if (time_after(now, devinfo->arb_last_release + msecs_to_jiffies(5)) ||
 		    time_after(now, devinfo->arb_turn_start + 4 * slice))
@@ -850,6 +883,8 @@ static int uas_queuecommand_lck(struct scsi_cmnd *cmnd)
 		goto zombie;
 	}
 
+	/* arbiter: a deferred command is retried after one requeue cycle, not three */
+	cmnd->device->max_device_blocked = 1;
 	if (!arb_acquire(devinfo)) {
 		spin_unlock_irqrestore(&devinfo->lock, flags);
 		return SCSI_MLQUEUE_DEVICE_BUSY;
@@ -1028,8 +1063,6 @@ static int uas_slave_alloc(struct scsi_device *sdev)
 	sdev->sdev_bflags |= BLIST_SKIP_IO_HINTS;
 
 	sdev->hostdata = devinfo;
-	/* arbiter: retry a deferred command after one requeue cycle, not three */
-	sdev->max_device_blocked = 1;
 	return 0;
 }
 
@@ -1219,6 +1252,8 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	shost->max_lun = 256;
 	shost->max_channel = 0;
 	shost->sg_tablesize = udev->bus->sg_tablesize;
+	if (arb_max_sectors >= 8)
+		shost->max_sectors = arb_max_sectors;
 
 	devinfo = (struct uas_dev_info *)shost->hostdata;
 	devinfo->intf = intf;
@@ -1233,6 +1268,7 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	INIT_LIST_HEAD(&devinfo->arb_node);
 	devinfo->arb_listed = devinfo->arb_token = devinfo->arb_draining = 0;
 	devinfo->arb_seq = 0;
+	devinfo->arb_weight_held = 0;
 	INIT_WORK(&devinfo->work, uas_do_work);
 	INIT_WORK(&devinfo->scan_work, uas_scan_work);
 

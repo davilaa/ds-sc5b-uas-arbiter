@@ -34,9 +34,12 @@ cfg() {
   [ -z "$v" ] && v=$(grep -E "^$1=" "$DEFCFG" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"\r')
   echo "$v"
 }
-ENABLED=$(cfg ENABLED); ARB_MAX=$(cfg ARB_MAX); ARB_SLICE_MS=$(cfg ARB_SLICE_MS); MATCH=$(cfg MATCH)
-[[ $ARB_MAX =~ ^[0-9]+$ ]] || ARB_MAX=3
-[[ $ARB_SLICE_MS =~ ^[0-9]+$ ]] && [ "$ARB_SLICE_MS" -ge 5 ] || ARB_SLICE_MS=100
+ENABLED=$(cfg ENABLED); ARB_LIMIT=$(cfg ARB_LIMIT); UPSTREAM_WEIGHT=$(cfg UPSTREAM_WEIGHT)
+ARB_SLICE_MS=$(cfg ARB_SLICE_MS); MAX_SECTORS=$(cfg MAX_SECTORS); MATCH=$(cfg MATCH)
+[[ $ARB_LIMIT =~ ^[1-9]$ ]] || ARB_LIMIT=4
+[[ $UPSTREAM_WEIGHT =~ ^[1-4]$ ]] || UPSTREAM_WEIGHT=2
+[[ $ARB_SLICE_MS =~ ^[0-9]+$ ]] && [ "$ARB_SLICE_MS" -ge 5 ] && [ "$ARB_SLICE_MS" -le 1000 ] || ARB_SLICE_MS=100
+[[ $MAX_SECTORS =~ ^(0|1024|2048|4096)$ ]] || MAX_SECTORS=4096
 [ "$MATCH" = all ] || MATCH=dssc5b
 
 loaded() { [ -d $PARAMS ]; }
@@ -62,6 +65,29 @@ slow_bridges() { # print managed bridges that are not on a SuperSpeed (>=5000) l
     is_target "$dev" || continue
     [ "$(cat $dev/speed 2>/dev/null)" -ge 5000 ] 2>/dev/null || echo "$(basename "$dev")@$(cat $dev/speed 2>/dev/null)M"
   done
+}
+
+# if the release has a newer build for this kernel, replace the cached copy (quietly skipped when offline)
+refresh_module() {
+  [ -f "$MOD" ] || return 0
+  local base="https://github.com/$REPO/releases/download/modules/uas_arb-$KR.ko" remote
+  remote=$(curl -fsSL --connect-timeout 5 --max-time 15 "$base.sha256" 2>/dev/null | cut -d' ' -f1)
+  [[ $remote =~ ^[0-9a-f]{64}$ ]] || return 0
+  [ "$remote" = "$(sha256sum "$MOD" | cut -d' ' -f1)" ] && return 0
+  log "a newer uas_arb build for $KR is available, updating the cached module"
+  mv "$MOD" "$MOD.old"
+  if fetch_module; then rm -f "$MOD.old"; else mv "$MOD.old" "$MOD"; fi
+}
+
+# module parameters, limited to the ones this module build supports (older cached builds lack some)
+mod_params() {
+  local have=$(modinfo -p "$1" 2>/dev/null | cut -d: -f1) p out=""
+  local max=$ARB_LIMIT
+  if ! grep -qx arb_upstream_weight <<<"$have"; then max=3; fi      # v2 build: 'any 3 devices'
+  for p in "arb_max=$max" "arb_slice_ms=$ARB_SLICE_MS" "arb_upstream_weight=$UPSTREAM_WEIGHT" "arb_max_sectors=$MAX_SECTORS"; do
+    grep -qx "${p%%=*}" <<<"$have" && out="$out $p"
+  done
+  echo $out
 }
 
 fetch_module() {
@@ -106,6 +132,7 @@ rebind() { # [iface]
 start() {
   if [ "$ENABLED" != yes ]; then log "disabled in settings, using stock uas"; return 0; fi
   if ! loaded; then
+    refresh_module
     if ! fetch_module; then
       log "no uas_arb module for kernel $KR - drives stay on the stock uas driver"
       notify "No module for kernel $KR" "No prebuilt uas_arb for $KR. The DS-SC5B drives use the stock driver (UAS resets possible under heavy load). See the GitHub repo for how to add a kernel." warning
@@ -114,9 +141,10 @@ start() {
     if [ "$(modinfo -F vermagic "$MOD" | cut -d' ' -f1)" != "$KR" ]; then
       log "cached module does not match kernel $KR, removing it"; rm -f "$MOD"; return 0
     fi
-    cp "$MOD" /tmp/uas_arb.ko && insmod /tmp/uas_arb.ko arb_max=$ARB_MAX arb_slice_ms=$ARB_SLICE_MS \
+    local params=$(mod_params "$MOD")
+    cp "$MOD" /tmp/uas_arb.ko && insmod /tmp/uas_arb.ko $params \
       || { log "insmod failed"; notify "Load failed" "insmod uas_arb failed on $KR, using stock uas" alert; return 1; }
-    log "loaded uas_arb (arb_max=$ARB_MAX arb_slice_ms=$ARB_SLICE_MS) for $KR"
+    log "loaded uas_arb ($params) for $KR"
   fi
   install_rule
   local slow=$(slow_bridges | tr '\n' ' ')
@@ -133,9 +161,11 @@ start() {
 
 apply() {
   if loaded; then
-    if [ "$ENABLED" = yes ]; then echo "$ARB_MAX" > $PARAMS/arb_max; else echo 0 > $PARAMS/arb_max; fi
+    local max=$ARB_LIMIT
+    if [ -w $PARAMS/arb_upstream_weight ]; then echo "$UPSTREAM_WEIGHT" > $PARAMS/arb_upstream_weight; else max=3; fi
+    if [ "$ENABLED" = yes ]; then echo "$max" > $PARAMS/arb_max; else echo 0 > $PARAMS/arb_max; fi
     echo "$ARB_SLICE_MS" > $PARAMS/arb_slice_ms
-    log "applied: enabled=$ENABLED arb_max=$(cat $PARAMS/arb_max) arb_slice_ms=$(cat $PARAMS/arb_slice_ms)"
+    log "applied: enabled=$ENABLED arb_max=$(cat $PARAMS/arb_max) upstream_weight=$(cat $PARAMS/arb_upstream_weight 2>/dev/null || echo n/a) arb_slice_ms=$(cat $PARAMS/arb_slice_ms) (max command size takes effect at next boot)"
     [ "$ENABLED" = yes ] && ! array_started && rebind
   elif [ "$ENABLED" = yes ]; then
     start
@@ -160,9 +190,9 @@ stop() {
 
 status() {
   echo "kernel: $KR"
-  echo "settings: enabled=$ENABLED arb_max=$ARB_MAX arb_slice_ms=$ARB_SLICE_MS match=$MATCH"
+  echo "settings: enabled=$ENABLED limit=$ARB_LIMIT upstream_weight=$UPSTREAM_WEIGHT slice=${ARB_SLICE_MS}ms max_sectors=$MAX_SECTORS match=$MATCH"
   if loaded; then
-    echo "module: loaded (arb_max=$(cat $PARAMS/arb_max) arb_slice_ms=$(cat $PARAMS/arb_slice_ms) grants=$(cat $PARAMS/arb_grants) denies=$(cat $PARAMS/arb_denies) kicks=$(cat $PARAMS/arb_kicks 2>/dev/null))"
+    echo "module: loaded (arb_max=$(cat $PARAMS/arb_max) upstream_weight=$(cat $PARAMS/arb_upstream_weight 2>/dev/null || echo 'n/a (v2 build)') slice=$(cat $PARAMS/arb_slice_ms)ms max_sectors=$(cat $PARAMS/arb_max_sectors 2>/dev/null || echo n/a) grants=$(cat $PARAMS/arb_grants) denies=$(cat $PARAMS/arb_denies) kicks=$(cat $PARAMS/arb_kicks 2>/dev/null))"
   elif [ -f "$MOD" ]; then echo "module: cached for $KR, not loaded"
   else echo "module: none for $KR"; fi
   local i dev drv blk

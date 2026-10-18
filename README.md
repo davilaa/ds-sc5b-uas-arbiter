@@ -58,7 +58,7 @@ host xHCI ── hub1 (VL822) ─┬─ port 2: bridge ── bay 1  ("upstream 
 
 `uas_arb` is the stock Linux `uas` driver plus a small arbiter:
 
-* At most **`arb_max` (3)** UAS devices may have commands in flight at the same time. Any 3 bays are a combination that never fails.
+* Each device has a **weight**: bay 1 (on the first hub, shallower in the USB tree than the others) weighs **`arb_upstream_weight` (2)**, the four bays behind the cascaded hub weigh 1. Devices may have commands in flight only while their total weight stays within **`arb_max` (4)**. That allows all four cascaded bays together (tested clean at ~1 GB/s), or bay 1 plus two cascaded bays, but never the stalling combination of bay 1 plus three cascaded bays. (v2 used a plain "any 3 devices" rule, which is `arb_upstream_weight=1 arb_max=3`.)
 * A device that wants to issue while all slots are busy waits in a **FIFO line**. Its command is handed back to the SCSI layer as "busy" and retried; the device joins the line.
 * A device keeps its slot until it goes idle, or until its turn (**`arb_slice_ms`**) expires while others are waiting. Then it stops taking new commands, drains, releases the slot and rejoins at the back of the line.
 * When a slot frees, waiting devices are **woken immediately** (`blk_mq_run_hw_queues`), and `max_device_blocked = 1` keeps the SCSI retry delay to one cycle.
@@ -70,8 +70,10 @@ Module parameters (all writable at runtime under `/sys/module/uas_arb/parameters
 
 | Parameter | Default | Meaning |
 |---|---|---|
-| `arb_max` | 3 | max devices with commands in flight; **0 = arbiter off** (plain uas behaviour). 4 fails on the DS-SC5B |
-| `arb_slice_ms` | 20 | turn length when others are waiting; **100 recommended** for Unraid parity checks |
+| `arb_max` | 4 | max total weight of devices with commands in flight; **0 = arbiter off** (plain uas behaviour) |
+| `arb_upstream_weight` | 2 | weight of a device that sits higher in the hub tree than the other managed devices (DS-SC5B bay 1); others weigh 1 |
+| `arb_max_sectors` | 0 | max 512-byte sectors per command, applied at probe (0 = SCSI default 1024 = 512 KB; the plugin uses 4096 = 2 MB) |
+| `arb_slice_ms` | 20 | turn length when others are waiting; **100 recommended** for Unraid parity checks (plugin default) |
 | `arb_grants`, `arb_denies`, `arb_kicks` | — | read-only counters |
 
 ## Results
@@ -89,6 +91,17 @@ Module parameters (all writable at runtime under `/sys/module/uas_arb/parameters
 | Unraid, 4 parallel readers per disk: arbiter **off** (`arb_max=0`) vs **on** | off: 52 / 8 (+1 I/O error), on: **0 / 0** | — |
 | Unraid parity check (non-correcting), containers running | **0 / 0** | 127 MB/s |
 | Unraid parity check, idle system | **0 / 0** | **149 MB/s** |
+
+**v3 (weighted rule), fio QD8 on all 5 bays (Ubuntu VM, 60 s each, 0 resets in every run):**
+
+| Rule | slowest bay | total |
+|---|---|---|
+| v2: any 3 devices (`arb_upstream_weight=1 arb_max=3`) | 145 MB/s | 801 MB/s |
+| v3: weighted (`arb_upstream_weight=2 arb_max=4`) | 161 MB/s | 882 MB/s |
+| v3 + 2 MB commands (`arb_max_sectors=4096`) | 171 MB/s | 894 MB/s |
+| v3 + 2 MB, **10-minute soak** | 158 MB/s | 859 MB/s, **0 resets** |
+
+A parity check runs at the slowest bay's pace, so v3 should give ~10% more parity throughput (to be confirmed on a full Unraid check).
 
 ### Important: raise Unraid's parity pipeline tunables
 
