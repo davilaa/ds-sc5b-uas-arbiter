@@ -101,7 +101,26 @@ Unraid's parity engine keeps only a few reads queued per disk by default, so eve
 
 A high `md_sync_limit` gives parity checks priority over normal array I/O while they run.
 
-## Install on Unraid 7.2.2 (kernel 6.12.54-Unraid)
+## Install on Unraid: plugin (recommended)
+
+In the Unraid web UI open **Plugins → Install Plugin** and paste:
+
+```
+https://raw.githubusercontent.com/davilaa/ds-sc5b-uas-arbiter/main/plugin/uas-arb.plg
+```
+
+The plugin:
+* At every boot, **before the array starts**, downloads (once, then cached on the flash) the `uas_arb` module built for your exact kernel from the [`modules` release](https://github.com/davilaa/ds-sc5b-uas-arbiter/releases/tag/modules), verifies its SHA-256 and loads it.
+* Moves only the DS-SC5B bridges (ASM235CM behind a VIA VL822 hub) from `uas` to `uas_arb`.
+* Adds **Settings → User Utilities → DS-SC5B UAS Arbiter**: on/off, `arb_max`, turn length, live status and counters, and a warning if the parity tunables below are still at their defaults.
+* Never moves drives while the array is started. If you install it with the array running, it takes effect at the next boot.
+* If there's no module for your kernel yet (e.g. right after an Unraid upgrade), it leaves the stock driver in place and shows a notification. To add a kernel, put `/usr/src/linux-*-Unraid/.config` into [`configs/`](configs/) as `<uname -r>.config` (pull request welcome). The [`build-modules`](.github/workflows/build-modules.yml) workflow then builds and publishes the module.
+
+Supported kernels: see [`configs/`](configs/). Currently **6.12.54-Unraid** (Unraid 7.2.2).
+
+Don't forget the [parity tunables](#important-raise-unraids-parity-pipeline-tunables).
+
+## Install on Unraid: manual (without the plugin)
 
 1. Check your kernel: `uname -r` must print `6.12.54-Unraid`. For any other kernel, [build it](#building) first.
 2. Copy the files to the flash drive:
@@ -173,12 +192,15 @@ More detail, raw numbers and the firmware notes are in [docs/investigation.md](d
 ## Repository layout
 
 ```
+plugin/     uas-arb.plg (Unraid plugin, generated) and src/ (control script, settings page, defaults)
+configs/    Unraid kernel configs; one module is built per file by .github/workflows/build-modules.yml
 src/        uas_arb.c (patched uas.c, v6.12.54) + headers + Makefile
 patches/    uas-arbiter-v6.12.54.patch (against upstream drivers/usb/storage/)
-prebuilt/   6.12.54-Unraid/uas_arb.ko + SHA256SUMS
+prebuilt/   6.12.54-Unraid/uas_arb.ko + SHA256SUMS (for the manual install)
 unraid/     go-snippet.sh, rebind.sh, 99-uas-arb.rules, 99-usb-das-timeout.rules (optional)
 tools/      build-for-unraid.sh, ustress.sh, ft2.sh (fio matrix), perr.pl (hub link errors),
-            vlreg.pl (VL82x vendor regs), ana.py/ana2.py (usbmon analysis), d51.py (8051 disasm)
+            vlreg.pl (VL82x vendor regs), ana.py/ana2.py (usbmon analysis), d51.py (8051 disasm),
+            make-plg.py (assembles plugin/uas-arb.plg from plugin/src)
 docs/       investigation.md
 ```
 

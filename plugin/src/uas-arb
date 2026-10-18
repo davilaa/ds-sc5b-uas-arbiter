@@ -1,0 +1,170 @@
+#!/bin/bash
+# uas-arb: control script for the "DS-SC5B UAS Arbiter" Unraid plugin.
+#
+#   uas-arb start          load uas_arb for the running kernel and move the DS-SC5B bridges onto it
+#                          (run by the plugin at install/boot, before the array starts)
+#   uas-arb apply          apply settings from the plugin config (called by the settings page)
+#   uas-arb stop           arbiter off; if the array is stopped, give the drives back to stock uas and unload
+#   uas-arb rebind [IFACE] move matching bridge interfaces from uas to uas_arb (udev / manual)
+#   uas-arb status         plain-text status
+#
+# Safety rule: drives are never moved between drivers while the array is started, because that would
+# make the array disks disappear. In that case changes wait for the next boot or an array stop.
+
+PLG=uas-arb
+CFGDIR=/boot/config/plugins/$PLG
+CFG=$CFGDIR/$PLG.cfg
+DEFCFG=/usr/local/emhttp/plugins/$PLG/default.cfg
+REPO=davilaa/ds-sc5b-uas-arbiter
+KR=$(uname -r)
+MODDIR=$CFGDIR/modules/$KR
+MOD=$MODDIR/uas_arb.ko
+PARAMS=/sys/module/uas_arb/parameters
+RULE=/etc/udev/rules.d/99-uas-arb.rules
+SELF=/usr/local/emhttp/plugins/$PLG/scripts/uas-arb
+
+log() { logger -t uas-arb -- "$*"; echo "$*"; }
+notify() { /usr/local/emhttp/webGui/scripts/notify -e "DS-SC5B UAS Arbiter" -s "$1" -d "$2" -i "${3:-warning}" >/dev/null 2>&1; }
+
+# read KEY="value" from the user config, falling back to defaults (never source the file)
+cfg() {
+  local v
+  v=$(grep -E "^$1=" "$CFG" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"\r')
+  [ -z "$v" ] && v=$(grep -E "^$1=" "$DEFCFG" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"\r')
+  echo "$v"
+}
+ENABLED=$(cfg ENABLED); ARB_MAX=$(cfg ARB_MAX); ARB_SLICE_MS=$(cfg ARB_SLICE_MS); MATCH=$(cfg MATCH)
+[[ $ARB_MAX =~ ^[0-9]+$ ]] || ARB_MAX=3
+[[ $ARB_SLICE_MS =~ ^[0-9]+$ ]] && [ "$ARB_SLICE_MS" -ge 5 ] || ARB_SLICE_MS=100
+[ "$MATCH" = all ] || MATCH=dssc5b
+
+loaded() { [ -d $PARAMS ]; }
+array_started() { [ "$(/usr/local/sbin/mdcmd status 2>/dev/null | sed -n 's/^mdState=//p')" = STARTED ]; }
+
+# usb device dir -> is it an ASM235CM bridge we should handle?
+is_target() { # $1 = usb device sysfs dir (not the interface)
+  [ "$(cat $1/idVendor 2>/dev/null):$(cat $1/idProduct 2>/dev/null)" = "174c:55aa" ] || return 1
+  [ "$MATCH" = all ] && return 0
+  # DS-SC5B: the bridge must sit behind a VIA VL822 hub (2109:0822)
+  local d=$(dirname $1)
+  while [ -f $d/idVendor ]; do
+    [ "$(cat $d/idVendor):$(cat $d/idProduct)" = "2109:0822" ] && return 0
+    d=$(dirname $d)
+  done
+  return 1
+}
+
+fetch_module() {
+  [ -f "$MOD" ] && return 0
+  mkdir -p "$MODDIR"
+  local base="https://github.com/$REPO/releases/download/modules/uas_arb-$KR.ko" i
+  log "no module cached for kernel $KR, downloading $base"
+  for i in 1 2 3 4 5 6; do
+    if curl -fsSL --connect-timeout 10 -o "$MOD.tmp" "$base" && curl -fsSL --connect-timeout 10 -o "$MOD.sha256" "$base.sha256"; then
+      if [ "$(cut -d' ' -f1 "$MOD.sha256")" = "$(sha256sum "$MOD.tmp" | cut -d' ' -f1)" ]; then
+        mv "$MOD.tmp" "$MOD"; log "downloaded and verified uas_arb for $KR"; return 0
+      fi
+      log "checksum mismatch for downloaded module"; rm -f "$MOD.tmp" "$MOD.sha256"; return 1
+    fi
+    rm -f "$MOD.tmp"; sleep 10   # network may still be coming up at boot
+  done
+  return 1
+}
+
+install_rule() {
+  echo "ACTION==\"bind\", SUBSYSTEM==\"usb\", ENV{DEVTYPE}==\"usb_interface\", DRIVER==\"uas\", ATTRS{idVendor}==\"174c\", ATTRS{idProduct}==\"55aa\", RUN+=\"$SELF rebind %k\"" > $RULE
+  udevadm control --reload
+}
+
+rebind() { # [iface]
+  loaded || return 0
+  [ "$ENABLED" = yes ] || return 0
+  local i id dev n=0
+  for i in ${1:+/sys/bus/usb/devices/$1} ${1:-/sys/bus/usb/devices/*:1.0}; do
+    [ -e "$i/driver" ] || continue
+    [ "$(basename "$(readlink -f "$i/driver")")" = uas ] || continue
+    dev=$(dirname "$(readlink -f "$i")")
+    is_target "$dev" || continue
+    id=$(basename "$i")
+    echo "$id" > /sys/bus/usb/drivers/uas/unbind && echo "$id" > /sys/bus/usb/drivers/uas_arb/bind && { log "moved $id to uas_arb"; n=$((n+1)); }
+  done
+  return 0
+}
+
+start() {
+  if [ "$ENABLED" != yes ]; then log "disabled in settings, using stock uas"; return 0; fi
+  if ! loaded; then
+    if ! fetch_module; then
+      log "no uas_arb module for kernel $KR - drives stay on the stock uas driver"
+      notify "No module for kernel $KR" "No prebuilt uas_arb for $KR. The DS-SC5B drives use the stock driver (UAS resets possible under heavy load). See the GitHub repo for how to add a kernel." warning
+      return 0
+    fi
+    if [ "$(modinfo -F vermagic "$MOD" | cut -d' ' -f1)" != "$KR" ]; then
+      log "cached module does not match kernel $KR, removing it"; rm -f "$MOD"; return 0
+    fi
+    cp "$MOD" /tmp/uas_arb.ko && insmod /tmp/uas_arb.ko arb_max=$ARB_MAX arb_slice_ms=$ARB_SLICE_MS \
+      || { log "insmod failed"; notify "Load failed" "insmod uas_arb failed on $KR, using stock uas" alert; return 1; }
+    log "loaded uas_arb (arb_max=$ARB_MAX arb_slice_ms=$ARB_SLICE_MS) for $KR"
+  fi
+  install_rule
+  if array_started; then
+    log "array is started: not moving drives now (takes effect at next boot or after stopping the array)"
+  else
+    rebind
+  fi
+}
+
+apply() {
+  if loaded; then
+    if [ "$ENABLED" = yes ]; then echo "$ARB_MAX" > $PARAMS/arb_max; else echo 0 > $PARAMS/arb_max; fi
+    echo "$ARB_SLICE_MS" > $PARAMS/arb_slice_ms
+    log "applied: enabled=$ENABLED arb_max=$(cat $PARAMS/arb_max) arb_slice_ms=$(cat $PARAMS/arb_slice_ms)"
+    [ "$ENABLED" = yes ] && ! array_started && rebind
+  elif [ "$ENABLED" = yes ]; then
+    start
+  fi
+}
+
+stop() {
+  loaded || { rm -f $RULE; udevadm control --reload; return 0; }
+  echo 0 > $PARAMS/arb_max
+  rm -f $RULE; udevadm control --reload
+  if array_started; then
+    log "arbiter set to off; drives stay on uas_arb until the array is stopped or the server reboots"
+    return 0
+  fi
+  local i id
+  for i in /sys/bus/usb/drivers/uas_arb/*:1.0; do
+    [ -e "$i" ] || continue; id=$(basename "$i")
+    echo "$id" > /sys/bus/usb/drivers/uas_arb/unbind; echo "$id" > /sys/bus/usb/drivers/uas/bind && log "moved $id back to uas"
+  done
+  rmmod uas_arb && log "uas_arb unloaded"
+}
+
+status() {
+  echo "kernel: $KR"
+  echo "settings: enabled=$ENABLED arb_max=$ARB_MAX arb_slice_ms=$ARB_SLICE_MS match=$MATCH"
+  if loaded; then
+    echo "module: loaded (arb_max=$(cat $PARAMS/arb_max) arb_slice_ms=$(cat $PARAMS/arb_slice_ms) grants=$(cat $PARAMS/arb_grants) denies=$(cat $PARAMS/arb_denies) kicks=$(cat $PARAMS/arb_kicks 2>/dev/null))"
+  elif [ -f "$MOD" ]; then echo "module: cached for $KR, not loaded"
+  else echo "module: none for $KR"; fi
+  local i dev drv blk
+  for i in /sys/bus/usb/devices/*:1.0; do
+    dev=$(dirname "$(readlink -f "$i")")
+    [ "$(cat $dev/idVendor 2>/dev/null):$(cat $dev/idProduct 2>/dev/null)" = "174c:55aa" ] || continue
+    drv=$(basename "$(readlink -f "$i/driver" 2>/dev/null)" 2>/dev/null)
+    blk=$(ls -d $i/host*/target*/*/block/* 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')
+    echo "bridge $(basename "$i"): driver=${drv:-none} disk=${blk:-?} $(is_target "$dev" && echo target || echo ignored)"
+  done
+  echo "unraid: md_sync_limit=$(sed -n 's/^md_sync_limit="\{0,1\}\([0-9]*\).*/\1/p' /boot/config/disk.cfg) md_num_stripes=$(sed -n 's/^md_num_stripes="\{0,1\}\([0-9]*\).*/\1/p' /boot/config/disk.cfg) (recommended 80 / 8192)"
+  echo "recent uas resets since boot: $(dmesg | grep -c 'uas_eh_device_reset_handler start')"
+}
+
+case "$1" in
+  start) start ;;
+  apply) apply ;;
+  stop) stop ;;
+  rebind) rebind "$2" ;;
+  status) status ;;
+  *) echo "usage: $0 {start|apply|stop|rebind [iface]|status}"; exit 1 ;;
+esac

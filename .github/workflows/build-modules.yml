@@ -1,0 +1,67 @@
+name: build-modules
+
+# Builds uas_arb.ko for every Unraid kernel config in configs/ and publishes it to the "modules"
+# release (uas_arb-<kernel>.ko + .sha256). The Unraid plugin downloads from there.
+on:
+  push:
+    branches: [main]
+    paths: ['configs/**', 'src/**', 'tools/build-for-unraid.sh', '.github/workflows/build-modules.yml']
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: 'Rebuild modules that already exist'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Install build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential flex bison libelf-dev libssl-dev bc xz-utils
+
+      - name: Ensure "modules" release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view modules >/dev/null 2>&1 || gh release create modules \
+            --title "Prebuilt uas_arb modules" \
+            --notes "One uas_arb-<kernel>.ko (+ .sha256) per Unraid kernel, built from src/ by the build-modules workflow. The Unraid plugin downloads the one matching \`uname -r\`."
+
+      - name: Build and upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REBUILD: ${{ inputs.rebuild }}
+        run: |
+          set -euo pipefail
+          existing=$(gh release view modules --json assets -q '.assets[].name')
+          src_changed=no
+          if [ "${{ github.event_name }}" = push ] && git diff --name-only HEAD~1 HEAD | grep -qE '^(src/|tools/build-for-unraid.sh)'; then src_changed=yes; fi
+          mkdir -p dist
+          for cfg in configs/*.config; do
+            kr=$(basename "$cfg" .config)
+            asset="uas_arb-$kr.ko"
+            if echo "$existing" | grep -qx "$asset" && [ "$src_changed" = no ] && [ "${REBUILD:-false}" != true ]; then
+              echo "== $kr: already built, skipping"; continue
+            fi
+            echo "== building $kr"
+            WORK="$RUNNER_TEMP/build-$kr" tools/build-for-unraid.sh "$cfg"
+            ko="$RUNNER_TEMP/build-$kr/mod/uas_arb.ko"
+            vm=$(modinfo -F vermagic "$ko" | cut -d' ' -f1)
+            [ "$vm" = "$kr" ] || { echo "vermagic $vm != $kr"; exit 1; }
+            cp "$ko" "dist/$asset"
+            (cd dist && sha256sum "$asset" > "$asset.sha256")
+          done
+          if ls dist/*.ko >/dev/null 2>&1; then
+            gh release upload modules dist/* --clobber
+            ls -la dist
+          else
+            echo "nothing to upload"
+          fi

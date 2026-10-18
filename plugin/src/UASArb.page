@@ -1,0 +1,62 @@
+Menu="Utilities"
+Title="DS-SC5B UAS Arbiter"
+Icon="hdd-o"
+Tag="hdd-o"
+---
+<?php
+$plugin = 'uas-arb';
+$cfg = parse_plugin_cfg($plugin);
+$status = htmlspecialchars(shell_exec("/usr/local/emhttp/plugins/$plugin/scripts/uas-arb status 2>&1") ?? '');
+$disk = @parse_ini_file('/boot/config/disk.cfg') ?: [];
+$sync = (int)($disk['md_sync_limit'] ?? 5);
+$stripes = (int)($disk['md_num_stripes'] ?? 1280);
+?>
+<style>pre.uasarb{background:var(--background-color,#1c1b1b);padding:10px;white-space:pre-wrap}</style>
+
+Limits how many drives in a **Sabrent DS-SC5B** (and similar cascaded-hub USB enclosures with ASMedia `174c:55aa` bridges) may have commands in flight at once, so the enclosure stops losing UAS completions and resetting drives during parity checks.
+Details, test results and source: [github.com/davilaa/ds-sc5b-uas-arbiter](https://github.com/davilaa/ds-sc5b-uas-arbiter)
+
+<?if ($sync < 50 || $stripes < 4096):?>
+<p style="color:#e68a00"><i class="fa fa-warning"></i> Parity checks will be slow with the arbiter unless you raise <b>Settings → Disk Settings</b>:
+<b>md_sync_limit</b> = 80 (now <?=$sync?>) and <b>md_num_stripes</b> = 8192 (now <?=$stripes?>).</p>
+<?endif;?>
+
+<form markdown="1" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="<?=$plugin?>/<?=$plugin?>.cfg">
+<input type="hidden" name="#command" value="/plugins/<?=$plugin?>/scripts/uas-arb">
+<input type="hidden" name="#arg[1]" value="apply">
+
+Enable arbiter:
+: <select name="ENABLED">
+  <?=mk_option($cfg['ENABLED'], "yes", "Yes")?>
+  <?=mk_option($cfg['ENABLED'], "no", "No (stock behaviour)")?>
+  </select>
+
+> **No** sets the arbiter to unlimited immediately. Drives stay bound to `uas_arb` until the next boot.
+
+Max drives active at once (arb_max):
+: <select name="ARB_MAX">
+  <?for ($n=1; $n<=5; $n++):?><?=mk_option($cfg['ARB_MAX'], "$n", "$n".($n==3?" (recommended for DS-SC5B)":""))?><?endfor;?>
+  </select>
+
+> On the DS-SC5B, 4 or more busy bays trigger the stalls; 3 is the tested safe maximum.
+
+Turn length in ms (arb_slice_ms):
+: <input type="number" name="ARB_SLICE_MS" min="5" max="1000" value="<?=htmlspecialchars($cfg['ARB_SLICE_MS'])?>" class="narrow">
+
+> How long a drive may keep its slot while others are waiting. 100 gave the best Unraid parity speed.
+
+Which bridges to manage:
+: <select name="MATCH">
+  <?=mk_option($cfg['MATCH'], "dssc5b", "ASM235CM behind a VIA VL822 hub (DS-SC5B)")?>
+  <?=mk_option($cfg['MATCH'], "all", "All ASMedia 174c:55aa bridges")?>
+  </select>
+
+> Changes to the bridge selection take effect at the next boot (drives are never moved while the array is started).
+
+&nbsp;
+: <input type="submit" value="Apply"><input type="button" value="Done" onclick="done()">
+</form>
+
+### Status
+<pre class="uasarb"><?=$status?></pre>
