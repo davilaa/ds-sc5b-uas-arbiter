@@ -33,7 +33,7 @@ jobs:
         run: |
           gh release view modules >/dev/null 2>&1 || gh release create modules \
             --title "Prebuilt uas_arb modules" \
-            --notes "One uas_arb-<kernel>.ko (+ .sha256) per Unraid kernel, built from src/ by the build-modules workflow. The Unraid plugin downloads the one matching \`uname -r\`."
+            --notes "One uas_arb-KERNEL.ko (+ .sha256) per Unraid kernel (KERNEL = uname -r), built from src/ by the build-modules workflow. The Unraid plugin downloads the one matching \`uname -r\`."
 
       - name: Build and upload
         env:
