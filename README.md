@@ -116,7 +116,9 @@ The plugin:
 * Never moves drives while the array is started. If you install it with the array running, it takes effect at the next boot.
 * If there's no module for your kernel yet (e.g. right after an Unraid upgrade), it leaves the stock driver in place and shows a notification. To add a kernel, put `/usr/src/linux-*-Unraid/.config` into [`configs/`](configs/) as `<uname -r>.config` (pull request welcome). The [`build-modules`](.github/workflows/build-modules.yml) workflow then builds and publishes the module.
 
-Supported kernels: see [`configs/`](configs/). Currently **6.12.54-Unraid** (Unraid 7.2.2).
+Supported Unraid versions: see [`configs/unraid-versions.txt`](configs/unraid-versions.txt) (Unraid version → kernel). The build workflow checks [releases.unraid.net](https://releases.unraid.net/json) **weekly**, extracts the kernel config of every new release ≥ 7.0.0 (from `bzfirmware`), and builds a module for it from that kernel's own `uas.c` plus [`patches/uas-arbiter.patch`](patches/uas-arbiter.patch). If the patch stops applying to a new kernel, that build fails and the plugin keeps the stock driver until it's ported.
+
+**Tested on hardware:** Unraid 7.2.2 (6.12.54-Unraid). Other kernels are built automatically from the same patch but haven't been run on a DS-SC5B yet; please report results in an issue.
 
 Don't forget the [parity tunables](#important-raise-unraids-parity-pipeline-tunables).
 
@@ -152,8 +154,8 @@ insmod uas_arb.ko arb_max=3 arb_slice_ms=100 && bash rebind.sh
 
 * [`tools/build-for-unraid.sh`](tools/build-for-unraid.sh) `UNRAID_CONFIG [VERSION]` builds on any x86_64 Linux host. Copy `/usr/src/linux-<ver>-Unraid/.config` from the server.
 * It downloads the matching upstream kernel source, runs `modules_prepare` with Unraid's config, and builds `src/` with `KBUILD_MODPOST_WARN=1`. Unraid has `CONFIG_MODVERSIONS` and module signing off.
-* `src/uas_arb.c` is upstream **v6.12.54** `drivers/usb/storage/uas.c` plus the arbiter, plus Unraid's own `uas-detect.h` tweak (Seagate `0bc2` enclosures never bind to uas).
-* For other kernels, apply [`patches/uas-arbiter-v6.12.54.patch`](patches/uas-arbiter-v6.12.54.patch) to that kernel's `uas.c` / `uas-detect.h`. The arbiter itself was first developed and tested on v7.0, but this patch file is only verified against v6.12.54, so expect to fix up context on other versions.
+* The build takes `drivers/usb/storage/uas.c` (and friends) from the target kernel's own source and applies [`patches/uas-arbiter.patch`](patches/uas-arbiter.patch), which adds the arbiter plus Unraid's own `uas-detect.h` tweak (Seagate `0bc2` enclosures never bind to uas). `src/` is a ready-patched reference copy for 6.12.54.
+* The patch applies unchanged to v6.12.54 and v6.18.54 (`patch -p4` inside `drivers/usb/storage/`). The arbiter was first developed and tested on v7.0.
 
 On a regular distro where `uas` is a module, you can also build the patch in-tree as `uas` and skip `rebind.sh`.
 
@@ -193,12 +195,12 @@ More detail, raw numbers and the firmware notes are in [docs/investigation.md](d
 
 ```
 plugin/     uas-arb.plg (Unraid plugin, generated) and src/ (control script, settings page, defaults)
-configs/    Unraid kernel configs; one module is built per file by .github/workflows/build-modules.yml
+configs/    Unraid kernel configs + unraid-versions.txt; added/built automatically by .github/workflows/build-modules.yml
 src/        uas_arb.c (patched uas.c, v6.12.54) + headers + Makefile
-patches/    uas-arbiter-v6.12.54.patch (against upstream drivers/usb/storage/)
+patches/    uas-arbiter.patch (against upstream drivers/usb/storage/, applied at build time)
 prebuilt/   6.12.54-Unraid/uas_arb.ko + SHA256SUMS (for the manual install)
 unraid/     go-snippet.sh, rebind.sh, 99-uas-arb.rules, 99-usb-das-timeout.rules (optional)
-tools/      build-for-unraid.sh, ustress.sh, ft2.sh (fio matrix), perr.pl (hub link errors),
+tools/      build-for-unraid.sh, unraid-kernel-config.sh (config from an Unraid release), ustress.sh, ft2.sh (fio matrix), perr.pl (hub link errors),
             vlreg.pl (VL82x vendor regs), ana.py/ana2.py (usbmon analysis), d51.py (8051 disasm),
             make-plg.py (assembles plugin/uas-arb.plg from plugin/src)
 docs/       investigation.md

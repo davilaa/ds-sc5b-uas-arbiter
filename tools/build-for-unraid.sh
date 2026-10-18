@@ -11,8 +11,8 @@
 # upstream source + Unraid's .config loads fine. modpost cannot see the kernel's exported symbols
 # without a full kernel build, hence KBUILD_MODPOST_WARN=1 (the symbols resolve at insmod time).
 #
-# NOTE: src/uas_arb.c is based on upstream v6.12.54 drivers/usb/storage/uas.c. For a much newer or
-# older kernel, re-apply patches/uas-arbiter-v6.12.54.patch to that kernel's uas.c/uas-detect.h first.
+# The module is built from THIS kernel's own drivers/usb/storage/uas.c with patches/uas-arbiter.patch
+# applied (verified on 6.12.54 and 6.18.54). If the patch stops applying, the build fails.
 set -euo pipefail
 CFG=$(readlink -f "$1")
 VER=${2:-$(sed -n 's/^# Linux\/x86 \([0-9.]*\)\(-Unraid\)\{0,1\} Kernel Configuration/\1/p' "$CFG")}
@@ -27,7 +27,15 @@ cp "$CFG" .config
 make olddefconfig >/dev/null
 make modules_prepare -j"$(nproc)" >/dev/null
 echo "kernel release: $(make -s kernelrelease)"
-rm -rf "$WORK/mod" && cp -r "$HERE/src" "$WORK/mod"
+# take uas.c and friends from THIS kernel's source and apply the arbiter patch to them
+rm -rf "$WORK/mod" && mkdir -p "$WORK/mod"
+for f in uas.c uas-detect.h unusual_uas.h usb.h scsiglue.h debug.h; do
+  cp "$WORK/linux-$VER/drivers/usb/storage/$f" "$WORK/mod/"
+done
+( cd "$WORK/mod" && patch -p4 --no-backup-if-mismatch -s < "$HERE/patches/uas-arbiter.patch" ) \
+  || { echo "patches/uas-arbiter.patch does not apply to $VER - needs porting"; exit 1; }
+mv "$WORK/mod/uas.c" "$WORK/mod/uas_arb.c"
+printf 'obj-m := uas_arb.o\n' > "$WORK/mod/Makefile"
 make -C "$WORK/linux-$VER" M="$WORK/mod" KBUILD_MODPOST_WARN=1 modules 2>&1 | grep -v "undefined!" || true
 modinfo "$WORK/mod/uas_arb.ko" | grep -E '^(vermagic|name)'
 sha256sum "$WORK/mod/uas_arb.ko"

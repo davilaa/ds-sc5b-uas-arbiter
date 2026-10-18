@@ -1,13 +1,22 @@
 name: build-modules
 
-# Builds uas_arb.ko for every Unraid kernel config in configs/ and publishes it to the "modules"
-# release (uas_arb-<kernel>.ko + .sha256). The Unraid plugin downloads from there.
+# 1. Finds Unraid releases (>= MIN_UNRAID) in https://releases.unraid.net/json that are not yet in
+#    configs/unraid-versions.txt, extracts each one's kernel .config and commits it to configs/.
+# 2. Builds uas_arb.ko for every configs/<kernel>.config that has no module yet (or all, if src
+#    changed / rebuild requested) from that kernel's own uas.c + patches/uas-arbiter.patch, and
+#    publishes uas_arb-<kernel>.ko + .sha256 to the "modules" release, where the plugin downloads it.
 on:
   push:
     branches: [main]
-    paths: ['configs/**', 'src/**', 'tools/build-for-unraid.sh', '.github/workflows/build-modules.yml']
+    paths: ['configs/**', 'patches/**', 'tools/build-for-unraid.sh', 'tools/unraid-kernel-config.sh', '.github/workflows/build-modules.yml']
+  schedule:
+    - cron: '23 5 * * 1'   # weekly: pick up new Unraid releases
   workflow_dispatch:
     inputs:
+      versions:
+        description: 'Unraid versions to add (space-separated). Empty = all new releases >= MIN_UNRAID'
+        type: string
+        default: ''
       rebuild:
         description: 'Rebuild modules that already exist'
         type: boolean
@@ -15,6 +24,9 @@ on:
 
 permissions:
   contents: write
+
+env:
+  MIN_UNRAID: '7.0.0'
 
 jobs:
   build:
@@ -24,8 +36,41 @@ jobs:
         with:
           fetch-depth: 2
 
-      - name: Install build dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential flex bison libelf-dev libssl-dev bc xz-utils
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential flex bison libelf-dev libssl-dev bc xz-utils squashfs-tools unzip
+
+      - name: Add kernel configs for new Unraid releases
+        env:
+          VERSIONS: ${{ inputs.versions }}
+        run: |
+          set -euo pipefail
+          touch configs/unraid-versions.txt
+          if [ -z "${VERSIONS:-}" ]; then
+            VERSIONS=$(curl -fsSL https://releases.unraid.net/json | python3 -c "
+          import json,sys,os
+          def k(v): return tuple(int(x) for x in v.split('.') if x.isdigit())
+          m=k(os.environ['MIN_UNRAID'])
+          print(' '.join(r['version'] for r in json.load(sys.stdin) if r.get('url') and k(r['version'])>=m))")
+          fi
+          added=""
+          for v in $VERSIONS; do
+            grep -q "^$v " configs/unraid-versions.txt && continue
+            echo "== Unraid $v: extracting kernel config"
+            if kr=$(tools/unraid-kernel-config.sh "$v" configs); then
+              echo "$v $kr" >> configs/unraid-versions.txt; added="$added $v"
+              echo "   -> $kr"
+            else
+              echo "::warning::could not extract the kernel config of Unraid $v"
+            fi
+          done
+          sort -t. -k1,1n -k2,2n -k3,3n -u -o configs/unraid-versions.txt configs/unraid-versions.txt
+          if [ -n "$added" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add configs
+            git commit -m "configs: add kernel configs for Unraid$added"
+            git push
+          fi
 
       - name: Ensure "modules" release exists
         env:
@@ -33,35 +78,31 @@ jobs:
         run: |
           gh release view modules >/dev/null 2>&1 || gh release create modules \
             --title "Prebuilt uas_arb modules" \
-            --notes "One uas_arb-KERNEL.ko (+ .sha256) per Unraid kernel (KERNEL = uname -r), built from src/ by the build-modules workflow. The Unraid plugin downloads the one matching \`uname -r\`."
+            --notes "One uas_arb-KERNEL.ko (+ .sha256) per Unraid kernel (KERNEL = uname -r), built by the build-modules workflow. The Unraid plugin downloads the one matching \`uname -r\`."
 
-      - name: Build and upload
+      - name: Build and upload modules
         env:
           GH_TOKEN: ${{ github.token }}
           REBUILD: ${{ inputs.rebuild }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           existing=$(gh release view modules --json assets -q '.assets[].name')
-          src_changed=no
-          if [ "${{ github.event_name }}" = push ] && git diff --name-only HEAD~1 HEAD | grep -qE '^(src/|tools/build-for-unraid.sh)'; then src_changed=yes; fi
-          mkdir -p dist
+          changed=no
+          if [ "${{ github.event_name }}" = push ] && git diff --name-only HEAD~1 HEAD | grep -qE '^(patches/|tools/build-for-unraid.sh)'; then changed=yes; fi
+          mkdir -p dist; failed=""
           for cfg in configs/*.config; do
-            kr=$(basename "$cfg" .config)
-            asset="uas_arb-$kr.ko"
-            if echo "$existing" | grep -qx "$asset" && [ "$src_changed" = no ] && [ "${REBUILD:-false}" != true ]; then
-              echo "== $kr: already built, skipping"; continue
+            kr=$(basename "$cfg" .config); asset="uas_arb-$kr.ko"
+            if echo "$existing" | grep -qx "$asset" && [ "$changed" = no ] && [ "${REBUILD:-false}" != true ]; then
+              echo "== $kr: already built"; continue
             fi
             echo "== building $kr"
-            WORK="$RUNNER_TEMP/build-$kr" tools/build-for-unraid.sh "$cfg"
-            ko="$RUNNER_TEMP/build-$kr/mod/uas_arb.ko"
-            vm=$(modinfo -F vermagic "$ko" | cut -d' ' -f1)
-            [ "$vm" = "$kr" ] || { echo "vermagic $vm != $kr"; exit 1; }
-            cp "$ko" "dist/$asset"
-            (cd dist && sha256sum "$asset" > "$asset.sha256")
+            if WORK="$RUNNER_TEMP/build-$kr" tools/build-for-unraid.sh "$cfg"; then
+              ko="$RUNNER_TEMP/build-$kr/mod/uas_arb.ko"
+              if [ -f "$ko" ] && [ "$(modinfo -F vermagic "$ko" | cut -d' ' -f1)" = "$kr" ]; then
+                cp "$ko" "dist/$asset"; (cd dist && sha256sum "$asset" > "$asset.sha256")
+              else failed="$failed $kr"; fi
+            else failed="$failed $kr"; fi
+            rm -rf "$RUNNER_TEMP/build-$kr"
           done
-          if ls dist/*.ko >/dev/null 2>&1; then
-            gh release upload modules dist/* --clobber
-            ls -la dist
-          else
-            echo "nothing to upload"
-          fi
+          if ls dist/*.ko >/dev/null 2>&1; then gh release upload modules dist/* --clobber; ls -la dist; fi
+          if [ -n "$failed" ]; then echo "::error::build failed for:$failed (patch may need porting)"; exit 1; fi
