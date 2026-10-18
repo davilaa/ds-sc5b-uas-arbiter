@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "uas-arb">
 <!ENTITY author    "davilaa">
-<!ENTITY version   "2026.10.18">
+<!ENTITY version   "2026.10.18.1">
 <!ENTITY repo      "davilaa/ds-sc5b-uas-arbiter">
 <!ENTITY gitURL    "https://raw.githubusercontent.com/&repo;/main">
 <!ENTITY pluginURL "&gitURL;/plugin/&name;.plg">
@@ -16,8 +16,17 @@
 
 <CHANGES>
 ###&version;
-- Initial release: loads uas_arb (device arbiter) for the DS-SC5B, settings page, per-kernel module download
+- Fix: plugin updates now replace the previous version's files
+- Recognise the DS-SC5B when it falls back to USB 2 (VL822 USB2 hub 2109:2822)
+- Warn (log, notification, status) when the enclosure is not on a USB 3 link
 </CHANGES>
+
+<!-- remove files of a previous version first: the plugin manager skips files that already exist -->
+<FILE Run="/bin/bash">
+<INLINE>
+rm -rf &emhttp;
+</INLINE>
+</FILE>
 
 <!-- settings defaults -->
 <FILE Name="&emhttp;/default.cfg">
@@ -79,13 +88,22 @@ array_started() { [ "$(/usr/local/sbin/mdcmd status 2>/dev/null | sed -n 's/^mdS
 is_target() { # $1 = usb device sysfs dir (not the interface)
   [ "$(cat $1/idVendor 2>/dev/null):$(cat $1/idProduct 2>/dev/null)" = "174c:55aa" ] || return 1
   [ "$MATCH" = all ] && return 0
-  # DS-SC5B: the bridge must sit behind a VIA VL822 hub (2109:0822)
+  # DS-SC5B: the bridge must sit behind a VIA VL822 hub (2109:0822 USB3 side, 2109:2822 USB2 side)
   local d=$(dirname $1)
   while [ -f $d/idVendor ]; do
-    [ "$(cat $d/idVendor):$(cat $d/idProduct)" = "2109:0822" ] && return 0
+    case "$(cat $d/idVendor):$(cat $d/idProduct)" in 2109:0822|2109:2822) return 0 ;; esac
     d=$(dirname $d)
   done
   return 1
+}
+
+slow_bridges() { # print managed bridges that are not on a SuperSpeed (>=5000) link
+  local i dev
+  for i in /sys/bus/usb/devices/*:1.0; do
+    dev=$(dirname "$(readlink -f "$i")")
+    is_target "$dev" || continue
+    [ "$(cat $dev/speed 2>/dev/null)" -ge 5000 ] 2>/dev/null || echo "$(basename "$dev")@$(cat $dev/speed 2>/dev/null)M"
+  done
 }
 
 fetch_module() {
@@ -141,6 +159,11 @@ start() {
     log "loaded uas_arb (arb_max=$ARB_MAX arb_slice_ms=$ARB_SLICE_MS) for $KR"
   fi
   install_rule
+  local slow=$(slow_bridges | tr '\n' ' ')
+  if [ -n "$slow" ]; then
+    log "WARNING: enclosure bridges not on a USB 3 link: $slow (USB 2 fallback - replug the USB cable)"
+    notify "Enclosure on USB 2" "DS-SC5B bridges came up at USB 2 speed ($slow). Unplug and replug the enclosure's USB cable (not power) while the array is stopped." alert
+  fi
   if array_started; then
     log "array is started: not moving drives now (takes effect at next boot or after stopping the array)"
   else
@@ -188,9 +211,11 @@ status() {
     [ "$(cat $dev/idVendor 2>/dev/null):$(cat $dev/idProduct 2>/dev/null)" = "174c:55aa" ] || continue
     drv=$(basename "$(readlink -f "$i/driver" 2>/dev/null)" 2>/dev/null)
     blk=$(ls -d $i/host*/target*/*/block/* 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')
-    echo "bridge $(basename "$i"): driver=${drv:-none} disk=${blk:-?} $(is_target "$dev" && echo target || echo ignored)"
+    echo "bridge $(basename "$i"): driver=${drv:-none} disk=${blk:-?} speed=$(cat $dev/speed 2>/dev/null)M $(is_target "$dev" && echo target || echo ignored)"
   done
   echo "unraid: md_sync_limit=$(sed -n 's/^md_sync_limit="\{0,1\}\([0-9]*\).*/\1/p' /boot/config/disk.cfg) md_num_stripes=$(sed -n 's/^md_num_stripes="\{0,1\}\([0-9]*\).*/\1/p' /boot/config/disk.cfg) (recommended 80 / 8192)"
+  local slow=$(slow_bridges | tr '\n' ' ')
+  [ -n "$slow" ] && echo "WARNING: not on USB 3: $slow - replug the enclosure's USB cable (not power) with the array stopped"
   echo "recent uas resets since boot: $(dmesg | grep -c 'uas_eh_device_reset_handler start')"
 }
 

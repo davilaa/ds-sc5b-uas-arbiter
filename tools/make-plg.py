@@ -44,6 +44,13 @@ plg = f"""<?xml version='1.0' standalone='yes'?>
 {chr(10).join("- " + c for c in changes)}
 </CHANGES>
 
+<!-- remove files of a previous version first: the plugin manager skips files that already exist -->
+<FILE Run="/bin/bash">
+<INLINE>
+rm -rf &emhttp;
+</INLINE>
+</FILE>
+
 <!-- settings defaults -->
 <FILE Name="&emhttp;/default.cfg">
 <INLINE>
