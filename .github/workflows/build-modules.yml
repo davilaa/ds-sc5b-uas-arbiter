@@ -2,8 +2,9 @@ name: build-modules
 
 # 1. Finds Unraid releases (>= MIN_UNRAID) in https://releases.unraid.net/json that are not yet in
 #    configs/unraid-versions.txt, extracts each one's kernel .config and commits it to configs/.
-# 2. Builds uas_arb.ko for every configs/<kernel>.config that has no module yet (or all, if src
-#    whose .src source-hash sidecar is missing/stale, or all on request) from that kernel's own uas.c + patches/uas-arbiter.patch, and
+# 2. Builds uas_arb.ko for every configs/<kernel>.config
+#    whose .src source-hash sidecar is missing/stale (or all on request)) from that kernel's own uas.c +
+#    patches/uas-arbiter.patch, and
 #    publishes uas_arb-<kernel>.ko + .sha256 to the "modules" release, where the plugin downloads it.
 on:
   push:

@@ -9,8 +9,8 @@
 #   uas-arb rebind-later IFACE   same, after 3 s (used by the udev rule)
 #   uas-arb status         plain-text status
 #
-# Safety rule: drives are never moved between drivers while the array is started, because that would
-# make the array disks disappear. In that case changes wait for the next boot or an array stop.
+# Safety rule: drives are only moved between drivers at boot, before Unraid's emhttpd records the array
+# disks' device names (moving a bridge re-creates its disk under a new name). Otherwise: next boot.
 
 PLG=uas-arb
 CFGDIR=/boot/config/plugins/$PLG
@@ -44,6 +44,10 @@ ARB_SLICE_MS=$(cfg ARB_SLICE_MS); MAX_SECTORS=$(cfg MAX_SECTORS); MATCH=$(cfg MA
 
 loaded() { [ -d $PARAMS ]; }
 array_started() { [ "$(/usr/local/sbin/mdcmd status 2>/dev/null | sed -n 's/^mdState=//p')" = STARTED ]; }
+# Unraid's emhttpd records the array disks' device names when it starts. Moving a bridge to another
+# driver re-creates its disk with a NEW name, after which the array refuses to start ("Start error",
+# md lock_bdev -2) until reboot. So drives are only moved before emhttpd runs, i.e. at boot.
+names_recorded() { pgrep -x emhttpd >/dev/null; }
 
 # usb device dir -> is it an ASM235CM bridge we should handle?
 is_target() { # $1 = usb device sysfs dir (not the interface)
@@ -152,8 +156,8 @@ start() {
     log "WARNING: enclosure bridges not on a USB 3 link: $slow (USB 2 fallback - replug the USB cable)"
     notify "Enclosure on USB 2" "DS-SC5B bridges came up at USB 2 speed ($slow). Unplug and replug the enclosure's USB cable (not power) while the array is stopped." alert
   fi
-  if array_started; then
-    log "array is started: not moving drives now (takes effect at next boot or after stopping the array)"
+  if names_recorded; then
+    log "Unraid is running: drives are not moved now (it would rename the array disks); takes effect at the next boot"
   else
     rebind
   fi
@@ -166,7 +170,7 @@ apply() {
     if [ "$ENABLED" = yes ]; then echo "$max" > $PARAMS/arb_max; else echo 0 > $PARAMS/arb_max; fi
     echo "$ARB_SLICE_MS" > $PARAMS/arb_slice_ms
     log "applied: enabled=$ENABLED arb_max=$(cat $PARAMS/arb_max) upstream_weight=$(cat $PARAMS/arb_upstream_weight 2>/dev/null || echo n/a) arb_slice_ms=$(cat $PARAMS/arb_slice_ms) (max command size takes effect at next boot)"
-    [ "$ENABLED" = yes ] && ! array_started && rebind
+    [ "$ENABLED" = yes ] && ! names_recorded && rebind
   elif [ "$ENABLED" = yes ]; then
     start
   fi
@@ -176,8 +180,8 @@ stop() {
   loaded || { rm -f $RULE; udevadm control --reload; return 0; }
   echo 0 > $PARAMS/arb_max
   rm -f $RULE; udevadm control --reload
-  if array_started; then
-    log "arbiter set to off; drives stay on uas_arb until the array is stopped or the server reboots"
+  if names_recorded; then
+    log "arbiter set to off; drives stay on uas_arb until the next boot (moving them now would rename the array disks)"
     return 0
   fi
   local i id
