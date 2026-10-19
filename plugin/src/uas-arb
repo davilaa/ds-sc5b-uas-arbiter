@@ -207,7 +207,7 @@ status() {
     blk=$(ls -d $i/host*/target*/*/block/* 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')
     echo "bridge $(basename "$i"): driver=${drv:-none} disk=${blk:-?} speed=$(cat $dev/speed 2>/dev/null)M $(is_target "$dev" && echo target || echo ignored)"
   done
-  echo "unraid: md_sync_limit=$(sed -n 's/^md_sync_limit="\{0,1\}\([0-9]*\).*/\1/p' /boot/config/disk.cfg) md_num_stripes=$(sed -n 's/^md_num_stripes="\{0,1\}\([0-9]*\).*/\1/p' /boot/config/disk.cfg) (recommended 80 / 32768, min 8192)"
+  echo "unraid: md_sync_limit=$(sed -n 's/^md_sync_limit="\{0,1\}\([0-9]*\).*/\1/p' /boot/config/disk.cfg) md_num_stripes=$(sed -n 's/^md_num_stripes="\{0,1\}\([0-9]*\).*/\1/p' /boot/config/disk.cfg) (stripes: recommended 32768, min 8192; sync limit: 5 = shares stay responsive, up to 80 = faster checks)"
   local slow=$(slow_bridges | tr '\n' ' ')
   [ -n "$slow" ] && echo "WARNING: not on USB 3: $slow - replug the enclosure's USB cable (not power) with the array stopped"
   echo "recent uas resets since boot: $(dmesg | grep -c 'uas_eh_device_reset_handler start')"

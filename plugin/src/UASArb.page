@@ -16,9 +16,9 @@ $stripes = (int)($disk['md_num_stripes'] ?? 1280);
 Limits how many drives in a **Sabrent DS-SC5B** (and similar cascaded-hub USB enclosures with ASMedia `174c:55aa` bridges) may have commands in flight at once, so the enclosure stops losing UAS completions and resetting drives during parity checks.
 Details, test results and source: [github.com/davilaa/ds-sc5b-uas-arbiter](https://github.com/davilaa/ds-sc5b-uas-arbiter)
 
-<?if ($sync < 50 || $stripes < 4096):?>
+<?if ($stripes < 8192):?>
 <p style="color:#e68a00"><i class="fa fa-warning"></i> Parity checks will be slow with the arbiter unless you raise <b>Settings → Disk Settings</b>:
-<b>md_sync_limit</b> = 80 (now <?=$sync?>) and <b>md_num_stripes</b> = 32768, or at least 8192 (now <?=$stripes?>).</p>
+<b>md_num_stripes</b> = 32768, or at least 8192 (now <?=$stripes?>). <b>md_sync_limit</b> (now <?=$sync?>) is a trade-off: 5 keeps shares responsive during a check, up to 80 makes the check faster.</p>
 <?endif;?>
 
 <form markdown="1" method="POST" action="/update.php" target="progressFrame">

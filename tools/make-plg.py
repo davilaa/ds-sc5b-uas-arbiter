@@ -4,7 +4,7 @@
 The .plg is self-contained (scripts and settings page are INLINE); only the kernel module is
 downloaded at run time, per kernel, from the GitHub release named "modules".
 """
-import pathlib, sys
+import html, pathlib, sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SRC = ROOT / "plugin" / "src"
@@ -41,7 +41,7 @@ plg = f"""<?xml version='1.0' standalone='yes'?>
 
 <CHANGES>
 ###&version;
-{chr(10).join("- " + c for c in changes)}
+{chr(10).join("- " + html.escape(c, quote=False) for c in changes)}
 </CHANGES>
 
 <!-- remove files of a previous version first: the plugin manager skips files that already exist -->

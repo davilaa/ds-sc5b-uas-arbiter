@@ -119,10 +119,14 @@ Unraid's parity engine keeps only a few reads queued per disk by default, so eve
 
 | Tunable | Default | Recommended | Parity speed (with arbiter, `arb_slice_ms=100`) |
 |---|---|---|---|
-| `md_sync_limit` | 5 | **80** | 31 MB/s → 77 MB/s |
+| `md_sync_limit` | 5 | **5-80, see below** | 31 MB/s → 77 MB/s (with 1280 → 8192 stripes) |
 | `md_num_stripes` | 1280 | **32768** (~600 MB RAM while a check runs; 8192 = ~130 MB) | → 127 MB/s with 8192 (149 idle); v3 + 32768: 162 MB/s idle |
 
-A high `md_sync_limit` gives parity checks priority over normal array I/O while they run.
+**`md_sync_limit` is a trade-off.** It is the share of the stripe pool a parity check may use, so a high value gives the check priority over normal array I/O. With all five bays behind one USB link that is noticeable: on my server, at 80 the check ran at ~150 MB/s but NFS clients on the array (Frigate recording 24/7, Plex) became too slow. At **5** (the Unraid default) with **32768 stripes** the check still ran at **~63 MB/s** and the shares stayed usable, because 5% of 32768 stripes is more than the whole default pool.
+
+* Server busy while checks run (cameras, media): keep `md_sync_limit=5`, raise `md_num_stripes` to 32768.
+* Server idle (or checks run overnight with the Parity Check Tuning plugin): `md_sync_limit=80` for ~2.4× the speed.
+* Note: after changing these, verify Settings → Disk Settings shows the value you saved before pressing Apply again; the form is filled from emhttp's in-memory value.
 
 ## Install on Unraid: plugin (recommended)
 
@@ -155,7 +159,7 @@ Don't forget the [parity tunables](#important-raise-unraids-parity-pipeline-tuna
    sha256sum /boot/config/uas_arb/uas_arb.ko   # compare with prebuilt/6.12.54-Unraid/SHA256SUMS
    ```
 3. Back up `/boot/config/go`, then add the contents of [`unraid/go-snippet.sh`](unraid/go-snippet.sh) **above** the `/usr/local/sbin/emhttp` line.
-4. Set `md_sync_limit=80` and `md_num_stripes=32768` (or 8192 if RAM is tight) in Settings → Disk Settings.
+4. In Settings → Disk Settings set `md_num_stripes=32768` (or 8192 if RAM is tight), and choose `md_sync_limit` (5 if the array is busy during checks, up to 80 if not; see the tunables section).
 5. Reboot. Check:
    ```
    grep uas_arb /var/log/syslog          # "rebound … to uas_arb", "loaded"
