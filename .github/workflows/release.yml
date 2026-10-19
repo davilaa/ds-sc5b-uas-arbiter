@@ -1,0 +1,33 @@
+name: release
+
+# Pushing a tag v<version> creates a GitHub Release whose notes are the matching
+# "## <version> …" section of CHANGELOG.md. The plugin file is attached for reference
+# (installs still use the raw URL from main).
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          ver="${GITHUB_REF_NAME#v}"
+          awk -v v="$ver" '
+            /^## /{ if (on) exit; on = ($2 == v) }
+            on && !/^## / { print }
+          ' CHANGELOG.md > notes.md
+          [ -s notes.md ] || { echo "no CHANGELOG section for $ver"; exit 1; }
+          title=$(grep -m1 "^## $ver" CHANGELOG.md | sed 's/^## //')
+          echo "TITLE=$title" >> "$GITHUB_ENV"
+          cat notes.md
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$TITLE" --notes-file notes.md plugin/uas-arb.plg

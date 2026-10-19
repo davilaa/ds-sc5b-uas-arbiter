@@ -1,6 +1,6 @@
 diff -ruN a/drivers/usb/storage/uas-detect.h b/drivers/usb/storage/uas-detect.h
---- a/drivers/usb/storage/uas-detect.h	2026-10-18 17:38:25.317462772 -0400
-+++ b/drivers/usb/storage/uas-detect.h	2026-10-18 17:38:25.318871704 -0400
+--- a/drivers/usb/storage/uas-detect.h	2026-10-19 02:45:22.407469159 -0400
++++ b/drivers/usb/storage/uas-detect.h	2026-10-19 02:45:22.413331232 -0400
 @@ -114,7 +114,7 @@
  
  	/* All Seagate disk enclosures have broken ATA pass-through support */
@@ -11,8 +11,8 @@ diff -ruN a/drivers/usb/storage/uas-detect.h b/drivers/usb/storage/uas-detect.h
  	/*
  	 * RTL9210-based enclosure from HIKSEMI, MD202 reportedly have issues
 diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
---- a/drivers/usb/storage/uas.c	2026-10-18 17:38:25.316747996 -0400
-+++ b/drivers/usb/storage/uas.c	2026-10-18 17:38:25.318169302 -0400
+--- a/drivers/usb/storage/uas.c	2026-10-19 02:45:22.405786257 -0400
++++ b/drivers/usb/storage/uas.c	2026-10-19 02:45:22.408890776 -0400
 @@ -6,6 +6,13 @@
   * Copyright Hans de Goede <hdegoede@redhat.com> for Red Hat, Inc. 2013 - 2016
   * Copyright Matthew Wilcox for Intel Corp, 2010
@@ -27,23 +27,27 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
   */
  
  #include <linux/blkdev.h>
-@@ -47,6 +54,12 @@
+@@ -47,6 +54,14 @@
  	spinlock_t lock;
  	struct work_struct work;
  	struct work_struct scan_work;      /* for async scanning */
 +	/* arbiter: cap concurrently active devices (DS-SC5B upstream-hub ERDY loss workaround) */
 +	struct list_head arb_node;
-+	unsigned arb_listed:1, arb_token:1, arb_draining:1;
-+	unsigned long arb_turn_start, arb_last_release, arb_cool_until, arb_last_want;
++	unsigned arb_listed:1, arb_draining:1;
++	unsigned arb_new_turn:1;	/* last release ended a turn: next slot starts a fresh one */
++	bool arb_token;			/* holds a slot; own storage so it can be read without arb_lock */
++	unsigned long arb_turn_start, arb_last_release, arb_last_want;
 +	u64 arb_seq;	/* FIFO position while waiting, 0 = not waiting */
 +	int arb_weight_held;	/* weight charged while holding a slot */
  };
  
  enum {
-@@ -82,6 +95,215 @@
+@@ -82,6 +97,225 @@
  static void uas_log_cmd_state(struct scsi_cmnd *cmnd, const char *prefix,
  				int status);
  
++MODULE_VERSION("3.1");	/* arbiter version, see CHANGELOG.md */
++
 +static int arb_max = 4;
 +module_param(arb_max, int, 0644);
 +MODULE_PARM_DESC(arb_max, "max total weight of UAS devices with commands in flight at once (0 = unlimited)");
@@ -164,8 +168,10 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
 +	arb_weight_used -= devinfo->arb_weight_held;
 +	devinfo->arb_weight_held = 0;
 +	devinfo->arb_last_release = jiffies;
-+	if (devinfo->arb_draining)
++	if (devinfo->arb_draining) {
 +		devinfo->arb_seq = ++arb_seq_next;	/* back of the line */
++		devinfo->arb_new_turn = 1;
++	}
 +	devinfo->arb_draining = 0;
 +	queue_work(system_highpri_wq, &arb_kick_work);
 +}
@@ -174,8 +180,11 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
 +static bool arb_acquire(struct uas_dev_info *devinfo)
 +{
 +	unsigned long flags, now = jiffies;
-+	unsigned long slice = msecs_to_jiffies(arb_slice_ms);
++	unsigned long slice = msecs_to_jiffies(arb_slice_ms > 0 ? arb_slice_ms : 1);
 +	bool ok = false;
++
++	if (!slice)
++		slice = 1;
 +
 +	if (arb_max <= 0 && !devinfo->arb_token)
 +		return true;
@@ -212,10 +221,12 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
 +		devinfo->arb_draining = 0;
 +		devinfo->arb_weight_held = w;
 +		arb_weight_used += w;
-+		/* short idle gaps continue the same turn */
-+		if (time_after(now, devinfo->arb_last_release + msecs_to_jiffies(5)) ||
++		/* short idle gaps continue the same turn; a turn that was ended for a waiter does not */
++		if (devinfo->arb_new_turn ||
++		    time_after(now, devinfo->arb_last_release + msecs_to_jiffies(5)) ||
 +		    time_after(now, devinfo->arb_turn_start + 4 * slice))
 +			devinfo->arb_turn_start = now;
++		devinfo->arb_new_turn = 0;
 +		ok = true;
 +	}
 +out:
@@ -232,7 +243,8 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
 +{
 +	unsigned long flags;
 +
-+	if (!devinfo->arb_token || arb_inflight(devinfo))
++	/* unlocked peek: the only other writer is arb_unlist() and the locked path re-checks */
++	if (!READ_ONCE(devinfo->arb_token) || arb_inflight(devinfo))
 +		return;
 +	spin_lock_irqsave(&arb_lock, flags);
 +	arb_do_release(devinfo);
@@ -256,7 +268,7 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
  /*
   * This driver needs its own workqueue, as we need to control memory allocation.
   *
-@@ -254,6 +476,7 @@
+@@ -254,6 +488,7 @@
  			      COMMAND_ABORTED))
  		return -EBUSY;
  	devinfo->cmnd[cmdinfo->uas_tag - 1] = NULL;
@@ -264,7 +276,7 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
  	uas_free_unsubmitted_urbs(cmnd);
  	scsi_done(cmnd);
  	return 0;
-@@ -660,12 +883,20 @@
+@@ -660,12 +895,20 @@
  		goto zombie;
  	}
  
@@ -285,7 +297,7 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
  		spin_unlock_irqrestore(&devinfo->lock, flags);
  		return SCSI_MLQUEUE_DEVICE_BUSY;
  	}
-@@ -705,6 +936,7 @@
+@@ -705,6 +948,7 @@
  	if (err) {
  		/* If we did nothing, give up now */
  		if (cmdinfo->state & SUBMIT_STATUS_URB) {
@@ -293,7 +305,7 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
  			spin_unlock_irqrestore(&devinfo->lock, flags);
  			return SCSI_MLQUEUE_DEVICE_BUSY;
  		}
-@@ -713,6 +945,7 @@
+@@ -713,6 +957,7 @@
  
  	devinfo->cmnd[idx] = cmnd;
  zombie:
@@ -301,15 +313,17 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
  	spin_unlock_irqrestore(&devinfo->lock, flags);
  	return 0;
  }
-@@ -741,6 +974,7 @@
+@@ -741,6 +986,9 @@
  
  	/* Drop all refs to this cmnd, kill data urbs to break their ref */
  	devinfo->cmnd[cmdinfo->uas_tag - 1] = NULL;
++	/* arbiter: the slot is freed while the data urbs below are still being killed; this only
++	 * happens in error recovery of an already stalled device, so it cannot provoke a stall */
 +	arb_maybe_release(devinfo);
  	if (cmdinfo->state & DATA_IN_URB_INFLIGHT)
  		data_in_urb = usb_get_urb(cmdinfo->data_in_urb);
  	if (cmdinfo->state & DATA_OUT_URB_INFLIGHT)
-@@ -902,7 +1136,7 @@
+@@ -902,7 +1150,7 @@
  
  static const struct scsi_host_template uas_host_template = {
  	.module = THIS_MODULE,
@@ -318,7 +332,7 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
  	.queuecommand = uas_queuecommand,
  	.target_alloc = uas_target_alloc,
  	.slave_alloc = uas_slave_alloc,
-@@ -1018,6 +1252,8 @@
+@@ -1018,6 +1266,8 @@
  	shost->max_lun = 256;
  	shost->max_channel = 0;
  	shost->sg_tablesize = udev->bus->sg_tablesize;
@@ -327,18 +341,19 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
  
  	devinfo = (struct uas_dev_info *)shost->hostdata;
  	devinfo->intf = intf;
-@@ -1029,6 +1265,10 @@
+@@ -1029,6 +1279,11 @@
  	init_usb_anchor(&devinfo->sense_urbs);
  	init_usb_anchor(&devinfo->data_urbs);
  	spin_lock_init(&devinfo->lock);
 +	INIT_LIST_HEAD(&devinfo->arb_node);
-+	devinfo->arb_listed = devinfo->arb_token = devinfo->arb_draining = 0;
++	devinfo->arb_listed = devinfo->arb_draining = devinfo->arb_new_turn = 0;
++	devinfo->arb_token = false;
 +	devinfo->arb_seq = 0;
 +	devinfo->arb_weight_held = 0;
  	INIT_WORK(&devinfo->work, uas_do_work);
  	INIT_WORK(&devinfo->scan_work, uas_scan_work);
  
-@@ -1216,6 +1456,7 @@
+@@ -1216,6 +1471,7 @@
  	usb_kill_anchored_urbs(&devinfo->sense_urbs);
  	usb_kill_anchored_urbs(&devinfo->data_urbs);
  	uas_zap_pending(devinfo, DID_NO_CONNECT);
@@ -346,7 +361,7 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
  
  	/*
  	 * Prevent SCSI scanning (if it hasn't started yet)
-@@ -1249,7 +1490,7 @@
+@@ -1249,7 +1505,7 @@
  }
  
  static struct usb_driver uas_driver = {
@@ -355,7 +370,7 @@ diff -ruN a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
  	.probe = uas_probe,
  	.disconnect = uas_disconnect,
  	.pre_reset = uas_pre_reset,
-@@ -1281,6 +1522,7 @@
+@@ -1281,6 +1537,7 @@
  static void __exit uas_exit(void)
  {
  	usb_deregister(&uas_driver);

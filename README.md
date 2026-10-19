@@ -215,6 +215,7 @@ More detail, raw numbers and the firmware notes are in [docs/investigation.md](d
 * [x] fio read matrix and 10-minute soak (Ubuntu 26.04, kernel 7.0)
 * [x] Unraid 6.12.54: arbiter on/off control test
 * [x] Unraid parity check (non-correcting and correcting) under load: 0 aborts, 0 resets so far
+* [x] Code review of the arbiter and all its hooks (lock order, lifetimes, slot accounting, every release path): no correctness or safety bugs; four minor items fixed in driver 3.1, see [CHANGELOG.md](CHANGELOG.md)
 * [ ] Full 27.3 TB parity check to completion (in progress)
 * [ ] Heavy write test (parity sync / rebuild)
 
@@ -232,6 +233,10 @@ tools/      build-for-unraid.sh, unraid-kernel-config.sh (config from an Unraid 
             make-plg.py (assembles plugin/uas-arb.plg from plugin/src)
 docs/       investigation.md
 ```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md). Each `v<version>` tag is a GitHub Release with the same notes. The driver reports its own version (`modinfo uas_arb.ko`, `/sys/module/uas_arb/version`, and the plugin status page).
 
 ## License
 

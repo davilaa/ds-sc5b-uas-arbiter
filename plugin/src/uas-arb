@@ -196,7 +196,7 @@ status() {
   echo "kernel: $KR"
   echo "settings: enabled=$ENABLED limit=$ARB_LIMIT upstream_weight=$UPSTREAM_WEIGHT slice=${ARB_SLICE_MS}ms max_sectors=$MAX_SECTORS match=$MATCH"
   if loaded; then
-    echo "module: loaded (arb_max=$(cat $PARAMS/arb_max) upstream_weight=$(cat $PARAMS/arb_upstream_weight 2>/dev/null || echo 'n/a (v2 build)') slice=$(cat $PARAMS/arb_slice_ms)ms max_sectors=$(cat $PARAMS/arb_max_sectors 2>/dev/null || echo n/a) grants=$(cat $PARAMS/arb_grants) denies=$(cat $PARAMS/arb_denies) kicks=$(cat $PARAMS/arb_kicks 2>/dev/null))"
+    echo "module: loaded, driver $(cat /sys/module/uas_arb/version 2>/dev/null || echo 3.0) (arb_max=$(cat $PARAMS/arb_max) upstream_weight=$(cat $PARAMS/arb_upstream_weight 2>/dev/null || echo 'n/a (v2 build)') slice=$(cat $PARAMS/arb_slice_ms)ms max_sectors=$(cat $PARAMS/arb_max_sectors 2>/dev/null || echo n/a) grants=$(cat $PARAMS/arb_grants) denies=$(cat $PARAMS/arb_denies) kicks=$(cat $PARAMS/arb_kicks 2>/dev/null))"
   elif [ -f "$MOD" ]; then echo "module: cached for $KR, not loaded"
   else echo "module: none for $KR"; fi
   local i dev drv blk

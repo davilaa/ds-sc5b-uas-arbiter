@@ -56,8 +56,10 @@ struct uas_dev_info {
 	struct work_struct scan_work;      /* for async scanning */
 	/* arbiter: cap concurrently active devices (DS-SC5B upstream-hub ERDY loss workaround) */
 	struct list_head arb_node;
-	unsigned arb_listed:1, arb_token:1, arb_draining:1;
-	unsigned long arb_turn_start, arb_last_release, arb_cool_until, arb_last_want;
+	unsigned arb_listed:1, arb_draining:1;
+	unsigned arb_new_turn:1;	/* last release ended a turn: next slot starts a fresh one */
+	bool arb_token;			/* holds a slot; own storage so it can be read without arb_lock */
+	unsigned long arb_turn_start, arb_last_release, arb_last_want;
 	u64 arb_seq;	/* FIFO position while waiting, 0 = not waiting */
 	int arb_weight_held;	/* weight charged while holding a slot */
 };
@@ -94,6 +96,8 @@ static int uas_try_complete(struct scsi_cmnd *cmnd, const char *caller);
 static void uas_free_streams(struct uas_dev_info *devinfo);
 static void uas_log_cmd_state(struct scsi_cmnd *cmnd, const char *prefix,
 				int status);
+
+MODULE_VERSION("3.1");	/* arbiter version, see CHANGELOG.md */
 
 static int arb_max = 4;
 module_param(arb_max, int, 0644);
@@ -215,8 +219,10 @@ static void arb_do_release(struct uas_dev_info *devinfo)
 	arb_weight_used -= devinfo->arb_weight_held;
 	devinfo->arb_weight_held = 0;
 	devinfo->arb_last_release = jiffies;
-	if (devinfo->arb_draining)
+	if (devinfo->arb_draining) {
 		devinfo->arb_seq = ++arb_seq_next;	/* back of the line */
+		devinfo->arb_new_turn = 1;
+	}
 	devinfo->arb_draining = 0;
 	queue_work(system_highpri_wq, &arb_kick_work);
 }
@@ -225,8 +231,11 @@ static void arb_do_release(struct uas_dev_info *devinfo)
 static bool arb_acquire(struct uas_dev_info *devinfo)
 {
 	unsigned long flags, now = jiffies;
-	unsigned long slice = msecs_to_jiffies(arb_slice_ms);
+	unsigned long slice = msecs_to_jiffies(arb_slice_ms > 0 ? arb_slice_ms : 1);
 	bool ok = false;
+
+	if (!slice)
+		slice = 1;
 
 	if (arb_max <= 0 && !devinfo->arb_token)
 		return true;
@@ -263,10 +272,12 @@ static bool arb_acquire(struct uas_dev_info *devinfo)
 		devinfo->arb_draining = 0;
 		devinfo->arb_weight_held = w;
 		arb_weight_used += w;
-		/* short idle gaps continue the same turn */
-		if (time_after(now, devinfo->arb_last_release + msecs_to_jiffies(5)) ||
+		/* short idle gaps continue the same turn; a turn that was ended for a waiter does not */
+		if (devinfo->arb_new_turn ||
+		    time_after(now, devinfo->arb_last_release + msecs_to_jiffies(5)) ||
 		    time_after(now, devinfo->arb_turn_start + 4 * slice))
 			devinfo->arb_turn_start = now;
+		devinfo->arb_new_turn = 0;
 		ok = true;
 	}
 out:
@@ -283,7 +294,8 @@ static void arb_maybe_release(struct uas_dev_info *devinfo)
 {
 	unsigned long flags;
 
-	if (!devinfo->arb_token || arb_inflight(devinfo))
+	/* unlocked peek: the only other writer is arb_unlist() and the locked path re-checks */
+	if (!READ_ONCE(devinfo->arb_token) || arb_inflight(devinfo))
 		return;
 	spin_lock_irqsave(&arb_lock, flags);
 	arb_do_release(devinfo);
@@ -974,6 +986,8 @@ static int uas_eh_abort_handler(struct scsi_cmnd *cmnd)
 
 	/* Drop all refs to this cmnd, kill data urbs to break their ref */
 	devinfo->cmnd[cmdinfo->uas_tag - 1] = NULL;
+	/* arbiter: the slot is freed while the data urbs below are still being killed; this only
+	 * happens in error recovery of an already stalled device, so it cannot provoke a stall */
 	arb_maybe_release(devinfo);
 	if (cmdinfo->state & DATA_IN_URB_INFLIGHT)
 		data_in_urb = usb_get_urb(cmdinfo->data_in_urb);
@@ -1266,7 +1280,8 @@ static int uas_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	init_usb_anchor(&devinfo->data_urbs);
 	spin_lock_init(&devinfo->lock);
 	INIT_LIST_HEAD(&devinfo->arb_node);
-	devinfo->arb_listed = devinfo->arb_token = devinfo->arb_draining = 0;
+	devinfo->arb_listed = devinfo->arb_draining = devinfo->arb_new_turn = 0;
+	devinfo->arb_token = false;
 	devinfo->arb_seq = 0;
 	devinfo->arb_weight_held = 0;
 	INIT_WORK(&devinfo->work, uas_do_work);
