@@ -1,0 +1,8 @@
+<CommunityApplications>
+  <Profile>
+DS-SC5B UAS Arbiter: an Unraid plugin that makes the Sabrent DS-SC5B 5-bay USB enclosure stable with all five bays in the array. Without it, parity checks and rebuilds trigger endless UAS aborts and USB resets ("uas_eh_abort_handler", "reset SuperSpeed Plus Gen 2x1 USB device"). The plugin loads a patched uas driver built for your exact Unraid kernel (auto-built for every Unraid release from 7.0) and only takes over the DS-SC5B's bridges. Support and bug reports: GitHub issues.
+  </Profile>
+  <Icon>https://raw.githubusercontent.com/davilaa/ds-sc5b-uas-arbiter/main/icon.svg</Icon>
+  <WebPage>https://github.com/davilaa/ds-sc5b-uas-arbiter</WebPage>
+  <Forum>https://github.com/davilaa/ds-sc5b-uas-arbiter/issues</Forum>
+</CommunityApplications>

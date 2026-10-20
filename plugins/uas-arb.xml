@@ -1,0 +1,17 @@
+<?xml version="1.0"?>
+<Plugin>
+  <Name>DS-SC5B UAS Arbiter</Name>
+  <Overview>Run all five bays of a Sabrent DS-SC5B USB enclosure in your Unraid array without UAS aborts, USB resets and stalls during parity checks and rebuilds, and without disabling UAS. The DS-SC5B's two cascaded VIA VL822 hubs lose data-ready notifications when its upstream bay and three or more downstream bays transfer at once; this plugin loads uas_arb, a patched copy of the kernel's uas driver that schedules the bays so that combination never happens. Only the DS-SC5B bridges (ASMedia ASM235CM behind a VL822) are moved to it, before the array starts; other USB disks keep the stock driver. A module for your exact Unraid kernel is downloaded from GitHub (auto-built for every release from 7.0) and verified by SHA-256. After installing, reboot, then raise md_num_stripes (32768) in Settings, Disk Settings. Settings and live counters: Settings, User Utilities, DS-SC5B UAS Arbiter.</Overview>
+  <PluginURL>https://raw.githubusercontent.com/davilaa/ds-sc5b-uas-arbiter/main/plugin/uas-arb.plg</PluginURL>
+  <PluginAuthor>davilaa</PluginAuthor>
+  <Support>https://github.com/davilaa/ds-sc5b-uas-arbiter/issues</Support>
+  <Project>https://github.com/davilaa/ds-sc5b-uas-arbiter</Project>
+  <ReadMe>https://raw.githubusercontent.com/davilaa/ds-sc5b-uas-arbiter/main/README.md</ReadMe>
+  <Category>Drivers: Tools:System</Category>
+  <ExtraSearchTerms>sabrent ds-sc5b uas usb das enclosure 5-bay asm235cm vl822 reset parity</ExtraSearchTerms>
+  <Beta>true</Beta>
+  <MinVer>7.0.0</MinVer>
+  <Icon>https://raw.githubusercontent.com/davilaa/ds-sc5b-uas-arbiter/main/icon.svg</Icon>
+  <Photo>https://cdn.shopify.com/s/files/1/0604/2461/8241/products/DS-SC5B-Main.jpg?v=1635797126&amp;width=600</Photo>
+  <License>GPLv2</License>
+</Plugin>
