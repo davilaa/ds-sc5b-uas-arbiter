@@ -1,5 +1,7 @@
 # DS-SC5B UAS Arbiter: Unraid plugin
 
+<a href="https://sabrent.com/products/ds-sc5b"><img align="right" width="240" src="https://cdn.shopify.com/s/files/1/0604/2461/8241/products/DS-SC5B-Main.jpg?v=1635797126&width=480" alt="Sabrent DS-SC5B 5-bay 3.5-inch SATA USB-C docking station: black aluminium case with five lockable bays and a power button per bay"></a>
+
 **An Unraid plugin that lets you run all five bays of a Sabrent DS-SC5B USB enclosure as array drives, without the UAS resets and stalls that break parity checks and rebuilds, and without disabling UAS.**
 
 If your Unraid syslog fills with `uas_eh_abort_handler` / `reset SuperSpeed Plus Gen 2x1 USB device` during a parity check, disk temperatures disappear, or the check crawls along at a few MB/s, this is for you.
