@@ -66,6 +66,8 @@ The stall *rate* is independent of queue depth; only the number of aborted comma
   | `dd` (QD ~2) | 10 s | one bay starved |
   | Unraid parity check | 5 s | 173 aborts / 4 min, 50 MB checked |
 
+  Don't use a short timeout with the arbiter either: once spin-down works, a sleeping drive needs ~15 s to spin up, so a 5 s timeout turns every spin-up into aborts and a USB reset (seen on 2026-10-20). Keep the 30 s default.
+
 * **Hub firmware** (VIA `HUBIspTool`, run on Windows): 9013 → 9043 "Phantom" Q7; then Tier1 `0984` on hub 1 + Tier2 `09C4` on hub 2. All flashed fine; no behaviour change.
 * **Bridge firmware** (ASMedia MPTool 3.6.3.0, `Format: UnChanged` so the IDs are kept): `200416d13c81` → `230830d17d80` on all 5. No change. The new firmware passes the drive's model string through in INQUIRY.
 * **VIA "switch to 5 Gbps"** (`HUBIspTool /SFG`): reports success, but it's a volatile register and lost on re-enumeration, so it couldn't be tested on the target host.

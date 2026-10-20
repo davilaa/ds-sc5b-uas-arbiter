@@ -213,7 +213,7 @@ On a regular distro where `uas` is a module, you can also build the patch in-tre
 | SCSI `queue_depth` | read-only on uas |
 | `nr_requests=4`, `max_sectors_kb=128` | no change |
 | `usbcore.quirks=2109:0822:k,174c:55aa:k` (no LPM) | no change |
-| SCSI command timeout 5 s instead of 30 s | helps light `dd` loads, **fails a parity check** (173 aborts / 4 min) |
+| SCSI command timeout 5 s instead of 30 s | helps light `dd` loads, **fails a parity check** (173 aborts / 4 min), and breaks spin-down (every ~15 s spin-up times out). Keep the 30 s default. |
 | VL822 hub firmware 9013 → 9043 (generic Q7) | no change |
 | VL822 Tier1 `0984` (hub 1) + Tier2 `09C4` (hub 2) | no change |
 | ASM235CM bridge firmware `200416d13c81` → `230830d17d80` (all 5) | no change |
@@ -247,7 +247,7 @@ configs/    Unraid kernel configs + unraid-versions.txt; added/built automatical
 src/        uas_arb.c (patched uas.c, v6.12.54) + headers + Makefile
 patches/    uas-arbiter.patch (against upstream drivers/usb/storage/, applied at build time)
 prebuilt/   6.12.54-Unraid/uas_arb.ko + SHA256SUMS (for the manual install)
-unraid/     go-snippet.sh, rebind.sh, 99-uas-arb.rules, 99-usb-das-timeout.rules (optional)
+unraid/     go-snippet.sh, rebind.sh, 99-uas-arb.rules, 99-usb-das-timeout.rules (old experiment, don't use)
 tools/      build-for-unraid.sh, unraid-kernel-config.sh (config from an Unraid release), ustress.sh, ft2.sh (fio matrix), perr.pl (hub link errors),
             vlreg.pl (VL82x vendor regs), ana.py/ana2.py (usbmon analysis), d51.py (8051 disasm),
             make-plg.py (assembles plugin/uas-arb.plg from plugin/src)

@@ -1,4 +1,6 @@
-# Optional companion: 5 s SCSI command timeout for the DS-SC5B bridges (174c:55aa).
-# Not needed when uas_arb is active, but it shortens recovery if the stock uas driver is in use
-# (e.g. after an Unraid upgrade before uas_arb is rebuilt).
+# DO NOT USE. Kept only as a record of an experiment (see docs/investigation.md section 4).
+# A 5 s SCSI command timeout for the DS-SC5B bridges (174c:55aa) was tried before the arbiter
+# existed. It is not needed with uas_arb, and it breaks disk spin-down: a sleeping drive takes
+# ~15 s to spin up, so every spin-up hits the 5 s timeout and causes aborts + a USB reset.
+# Leave the Linux default (30 s).
 ACTION=="add|change", SUBSYSTEM=="scsi", ENV{DEVTYPE}=="scsi_device", ATTRS{idVendor}=="174c", ATTRS{idProduct}=="55aa", ATTR{timeout}="5"
