@@ -1,8 +1,22 @@
-# ds-sc5b-uas-arbiter
+# DS-SC5B UAS Arbiter: Unraid plugin
 
-**A Linux UAS driver patch that makes the Sabrent DS-SC5B 5-bay USB enclosure stable on Unraid/Linux with all five drives busy at once (parity checks, rebuilds), without disabling UAS.**
+**An Unraid plugin that lets you run all five bays of a Sabrent DS-SC5B USB enclosure as array drives, without the UAS resets and stalls that break parity checks and rebuilds, and without disabling UAS.**
 
-> Status: **experimental, but working**. It runs on Unraid 7.2.2 (kernel 6.12.54-Unraid) with 5 array drives in a DS-SC5B. Parity checks run with **0 UAS aborts and 0 resets** at about **149 MB/s**. A full 27 TB parity check is in progress (see [Validation](#validation)). Use at your own risk; this is an unofficial kernel module.
+If your Unraid syslog fills with `uas_eh_abort_handler` / `reset SuperSpeed Plus Gen 2x1 USB device` during a parity check, disk temperatures disappear, or the check crawls along at a few MB/s, this is for you.
+
+### Quick install
+
+In the Unraid web UI open **Plugins → Install Plugin**, paste this URL and click **Install**:
+
+```
+https://raw.githubusercontent.com/davilaa/ds-sc5b-uas-arbiter/main/plugin/uas-arb.plg
+```
+
+Then reboot (or install before starting the array), and raise the [parity tunables](#important-raise-unraids-parity-pipeline-tunables). Settings live under **Settings → User Utilities → DS-SC5B UAS Arbiter**. Details: [Install on Unraid](#install-on-unraid-plugin-recommended).
+
+> Status: **experimental, but working**. It runs on Unraid 7.2.2 (kernel 6.12.54-Unraid) with 5 array drives in a DS-SC5B. Parity checks run with **0 UAS aborts and 0 resets** at about **149 MB/s**. A full 27 TB parity check is in progress (see [Validation](#validation)). Modules are built automatically for each new Unraid release (7.0 and later). Use at your own risk; this is an unofficial kernel module.
+>
+> Not on Unraid? The driver patch works on any Linux kernel; see [Install on Unraid: manual](#install-on-unraid-manual-without-the-plugin) and [Building](#building).
 
 ---
 
