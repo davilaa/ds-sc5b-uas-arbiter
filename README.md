@@ -4,19 +4,86 @@
 
 If your Unraid syslog fills with `uas_eh_abort_handler` / `reset SuperSpeed Plus Gen 2x1 USB device` during a parity check, disk temperatures disappear, or the check crawls along at a few MB/s, this is for you.
 
-### Quick install
+> [!IMPORTANT]
+> **Install in 3 steps:** add the plugin, reboot, raise two disk settings. That's it.
 
-In the Unraid web UI open **Plugins → Install Plugin**, paste this URL and click **Install**:
+## ⚡ Install on Unraid
+
+### Step 1: install the plugin
+
+In the Unraid web UI go to **Plugins → Install Plugin**, paste this URL and click **Install**:
 
 ```
 https://raw.githubusercontent.com/davilaa/ds-sc5b-uas-arbiter/main/plugin/uas-arb.plg
 ```
 
-Then reboot (or install before starting the array), and raise the [parity tunables](#important-raise-unraids-parity-pipeline-tunables). Settings live under **Settings → User Utilities → DS-SC5B UAS Arbiter**. Details: [Install on Unraid](#install-on-unraid-plugin-recommended).
+### Step 2: reboot
 
-> Status: **experimental, but working**. It runs on Unraid 7.2.2 (kernel 6.12.54-Unraid) with 5 array drives in a DS-SC5B. Parity checks run with **0 UAS aborts and 0 resets** at about **149 MB/s**. A full 27 TB parity check is in progress (see [Validation](#validation)). Modules are built automatically for each new Unraid release (7.0 and later). Use at your own risk; this is an unofficial kernel module.
->
-> Not on Unraid? The driver patch works on any Linux kernel; see [Install on Unraid: manual](#install-on-unraid-manual-without-the-plugin) and [Building](#building).
+The plugin only switches drives over while the array is stopped, so it takes effect at the next boot. After the reboot, check **Settings → User Utilities → DS-SC5B UAS Arbiter**: it should show the arbiter loaded and all five bays attached.
+
+### Step 3: raise Unraid's parity tunables
+
+In **Settings → Disk Settings**, set **`md_num_stripes` = 32768** and choose **`md_sync_limit`**: keep **5** if the array is busy while checks run (cameras, Plex), or use **80** if it's idle. Without this, parity checks stay slow (~30 MB/s) even though the resets are gone.
+
+<details><summary>Why, and measured speeds</summary>
+
+Unraid's parity engine keeps only a few reads queued per disk by default, so every turn handoff costs time. With the arbiter, tune **Settings → Disk Settings**:
+
+| Tunable | Default | Recommended | Parity speed (with arbiter, `arb_slice_ms=100`) |
+|---|---|---|---|
+| `md_sync_limit` | 5 | **5-80, see below** | 31 MB/s → 77 MB/s (with 1280 → 8192 stripes) |
+| `md_num_stripes` | 1280 | **32768** (~600 MB RAM while a check runs; 8192 = ~130 MB) | → 127 MB/s with 8192 (149 idle); v3 + 32768: 162 MB/s idle |
+
+**`md_sync_limit` is a trade-off.** It is the share of the stripe pool a parity check may use, so a high value gives the check priority over normal array I/O. With all five bays behind one USB link that is noticeable: on my server, at 80 the check ran at ~150 MB/s but NFS clients on the array (Frigate recording 24/7, Plex) became too slow. At **5** (the Unraid default) with **32768 stripes** the check still ran at **~63 MB/s** and the shares stayed usable, because 5% of 32768 stripes is more than the whole default pool.
+
+* Server busy while checks run (cameras, media): keep `md_sync_limit=5`, raise `md_num_stripes` to 32768.
+* Server idle (or checks run overnight with the Parity Check Tuning plugin): `md_sync_limit=80` for ~2.4× the speed.
+* Note: after changing these, verify Settings → Disk Settings shows the value you saved before pressing Apply again; the form is filled from emhttp's in-memory value.
+
+</details>
+
+### What the plugin does
+
+* At every boot, **before the array starts**, downloads (once, then cached on the flash) the `uas_arb` module built for your exact kernel from the [`modules` release](https://github.com/davilaa/ds-sc5b-uas-arbiter/releases/tag/modules), verifies its SHA-256 and loads it.
+* Moves only the DS-SC5B bridges (ASM235CM behind a VIA VL822 hub) from `uas` to `uas_arb`.
+* Adds **Settings → User Utilities → DS-SC5B UAS Arbiter**: on/off, `arb_max`, turn length, live status and counters, and a warning if the parity tunables above are still at their defaults.
+* Never moves drives while the array is started. If you install it with the array running, it takes effect at the next boot.
+* If there's no module for your kernel yet (e.g. right after an Unraid upgrade), it leaves the stock driver in place and shows a notification. To add a kernel, put `/usr/src/linux-*-Unraid/.config` into [`configs/`](configs/) as `<uname -r>.config` (pull request welcome). The [`build-modules`](.github/workflows/build-modules.yml) workflow then builds and publishes the module.
+
+Supported Unraid versions: see [`configs/unraid-versions.txt`](configs/unraid-versions.txt) (Unraid version → kernel). The build workflow checks [releases.unraid.net](https://releases.unraid.net/json) **weekly**, extracts the kernel config of every new release ≥ 7.0.0 (from `bzfirmware`), and builds a module for it from that kernel's own `uas.c` plus [`patches/uas-arbiter.patch`](patches/uas-arbiter.patch). If the patch stops applying to a new kernel, that build fails and the plugin keeps the stock driver until it's ported.
+
+**Tested on hardware:** Unraid 7.2.2 (6.12.54-Unraid). Other kernels are built automatically from the same patch but haven't been run on a DS-SC5B yet; please report results in an issue.
+
+### Without the plugin (manual install)
+
+1. Check your kernel: `uname -r` must print `6.12.54-Unraid`. For any other kernel, [build it](#building) first.
+2. Copy the files to the flash drive:
+   ```
+   mkdir -p /boot/config/uas_arb
+   cp prebuilt/6.12.54-Unraid/uas_arb.ko unraid/rebind.sh unraid/99-uas-arb.rules /boot/config/uas_arb/
+   sha256sum /boot/config/uas_arb/uas_arb.ko   # compare with prebuilt/6.12.54-Unraid/SHA256SUMS
+   ```
+3. Back up `/boot/config/go`, then add the contents of [`unraid/go-snippet.sh`](unraid/go-snippet.sh) **above** the `/usr/local/sbin/emhttp` line.
+4. In Settings → Disk Settings set `md_num_stripes=32768` (or 8192 if RAM is tight), and choose `md_sync_limit` (5 if the array is busy during checks, up to 80 if not; see [Step 3](#step-3-raise-unraids-parity-tunables)).
+5. Reboot. Check:
+   ```
+   grep uas_arb /var/log/syslog          # "rebound … to uas_arb", "loaded"
+   lsusb -t                              # the five Mass Storage interfaces show Driver=uas_arb
+   cat /sys/module/uas_arb/parameters/arb_max   # 3
+   ```
+   Drive letters may change (e.g. sdb… → sdh…). That's harmless, because Unraid assigns array disks by serial.
+
+**Live test without rebooting** (array **stopped**):
+```
+insmod uas_arb.ko arb_max=3 arb_slice_ms=100 && bash rebind.sh
+```
+
+**Disable:** `echo 0 > /sys/module/uas_arb/parameters/arb_max` (live), or remove the `go` lines and reboot.
+
+**Unraid upgrades:** the module only loads if its vermagic matches the running kernel. After an upgrade the `go` snippet skips it (logged as `uas_arb: skipped …`) and the drives stay on the stock driver, so **rebuild** for the new kernel. The built-in `uas` is never disabled, so the drives always have a driver.
+
+> [!NOTE]
+> **Status: experimental, but working.** It runs on Unraid 7.2.2 (kernel 6.12.54-Unraid) with 5 array drives in a DS-SC5B. Parity checks run with **0 UAS aborts and 0 resets** at about **149 MB/s**. A full 27 TB parity check is in progress (see [Validation](#validation)). Modules are built automatically for each new Unraid release (7.0 and later). Use at your own risk; this is an unofficial kernel module.
 
 ---
 
@@ -126,70 +193,6 @@ Module parameters (all writable at runtime under `/sys/module/uas_arb/parameters
 | v3, `arb_slice_ms` 50 / 100 / 200 | no measurable difference |
 
 0 aborts, 0 resets, 0 I/O errors throughout. The parity engine reads all disks in lockstep and waits for the slowest, so the fio gain (+11% for the slowest bay) only partly carries over; a deeper stripe pool recovers some of it.
-
-### Important: raise Unraid's parity pipeline tunables
-
-Unraid's parity engine keeps only a few reads queued per disk by default, so every turn handoff costs time. With the arbiter, tune **Settings → Disk Settings**:
-
-| Tunable | Default | Recommended | Parity speed (with arbiter, `arb_slice_ms=100`) |
-|---|---|---|---|
-| `md_sync_limit` | 5 | **5-80, see below** | 31 MB/s → 77 MB/s (with 1280 → 8192 stripes) |
-| `md_num_stripes` | 1280 | **32768** (~600 MB RAM while a check runs; 8192 = ~130 MB) | → 127 MB/s with 8192 (149 idle); v3 + 32768: 162 MB/s idle |
-
-**`md_sync_limit` is a trade-off.** It is the share of the stripe pool a parity check may use, so a high value gives the check priority over normal array I/O. With all five bays behind one USB link that is noticeable: on my server, at 80 the check ran at ~150 MB/s but NFS clients on the array (Frigate recording 24/7, Plex) became too slow. At **5** (the Unraid default) with **32768 stripes** the check still ran at **~63 MB/s** and the shares stayed usable, because 5% of 32768 stripes is more than the whole default pool.
-
-* Server busy while checks run (cameras, media): keep `md_sync_limit=5`, raise `md_num_stripes` to 32768.
-* Server idle (or checks run overnight with the Parity Check Tuning plugin): `md_sync_limit=80` for ~2.4× the speed.
-* Note: after changing these, verify Settings → Disk Settings shows the value you saved before pressing Apply again; the form is filled from emhttp's in-memory value.
-
-## Install on Unraid: plugin (recommended)
-
-In the Unraid web UI open **Plugins → Install Plugin** and paste:
-
-```
-https://raw.githubusercontent.com/davilaa/ds-sc5b-uas-arbiter/main/plugin/uas-arb.plg
-```
-
-The plugin:
-* At every boot, **before the array starts**, downloads (once, then cached on the flash) the `uas_arb` module built for your exact kernel from the [`modules` release](https://github.com/davilaa/ds-sc5b-uas-arbiter/releases/tag/modules), verifies its SHA-256 and loads it.
-* Moves only the DS-SC5B bridges (ASM235CM behind a VIA VL822 hub) from `uas` to `uas_arb`.
-* Adds **Settings → User Utilities → DS-SC5B UAS Arbiter**: on/off, `arb_max`, turn length, live status and counters, and a warning if the parity tunables below are still at their defaults.
-* Never moves drives while the array is started. If you install it with the array running, it takes effect at the next boot.
-* If there's no module for your kernel yet (e.g. right after an Unraid upgrade), it leaves the stock driver in place and shows a notification. To add a kernel, put `/usr/src/linux-*-Unraid/.config` into [`configs/`](configs/) as `<uname -r>.config` (pull request welcome). The [`build-modules`](.github/workflows/build-modules.yml) workflow then builds and publishes the module.
-
-Supported Unraid versions: see [`configs/unraid-versions.txt`](configs/unraid-versions.txt) (Unraid version → kernel). The build workflow checks [releases.unraid.net](https://releases.unraid.net/json) **weekly**, extracts the kernel config of every new release ≥ 7.0.0 (from `bzfirmware`), and builds a module for it from that kernel's own `uas.c` plus [`patches/uas-arbiter.patch`](patches/uas-arbiter.patch). If the patch stops applying to a new kernel, that build fails and the plugin keeps the stock driver until it's ported.
-
-**Tested on hardware:** Unraid 7.2.2 (6.12.54-Unraid). Other kernels are built automatically from the same patch but haven't been run on a DS-SC5B yet; please report results in an issue.
-
-Don't forget the [parity tunables](#important-raise-unraids-parity-pipeline-tunables).
-
-## Install on Unraid: manual (without the plugin)
-
-1. Check your kernel: `uname -r` must print `6.12.54-Unraid`. For any other kernel, [build it](#building) first.
-2. Copy the files to the flash drive:
-   ```
-   mkdir -p /boot/config/uas_arb
-   cp prebuilt/6.12.54-Unraid/uas_arb.ko unraid/rebind.sh unraid/99-uas-arb.rules /boot/config/uas_arb/
-   sha256sum /boot/config/uas_arb/uas_arb.ko   # compare with prebuilt/6.12.54-Unraid/SHA256SUMS
-   ```
-3. Back up `/boot/config/go`, then add the contents of [`unraid/go-snippet.sh`](unraid/go-snippet.sh) **above** the `/usr/local/sbin/emhttp` line.
-4. In Settings → Disk Settings set `md_num_stripes=32768` (or 8192 if RAM is tight), and choose `md_sync_limit` (5 if the array is busy during checks, up to 80 if not; see the tunables section).
-5. Reboot. Check:
-   ```
-   grep uas_arb /var/log/syslog          # "rebound … to uas_arb", "loaded"
-   lsusb -t                              # the five Mass Storage interfaces show Driver=uas_arb
-   cat /sys/module/uas_arb/parameters/arb_max   # 3
-   ```
-   Drive letters may change (e.g. sdb… → sdh…). That's harmless, because Unraid assigns array disks by serial.
-
-**Live test without rebooting** (array **stopped**):
-```
-insmod uas_arb.ko arb_max=3 arb_slice_ms=100 && bash rebind.sh
-```
-
-**Disable:** `echo 0 > /sys/module/uas_arb/parameters/arb_max` (live), or remove the `go` lines and reboot.
-
-**Unraid upgrades:** the module only loads if its vermagic matches the running kernel. After an upgrade the `go` snippet skips it (logged as `uas_arb: skipped …`) and the drives stay on the stock driver, so **rebuild** for the new kernel. The built-in `uas` is never disabled, so the drives always have a driver.
 
 ## Building
 
