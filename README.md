@@ -227,6 +227,7 @@ More detail, raw numbers and the firmware notes are in [docs/investigation.md](d
 * **Heavy writes are not yet stress-tested.** Light concurrent writes (containers running during the parity check) were error-free. Rebuilds and parity *syncs* write heavily.
 * The arbiter is **global**: it counts every device bound to `uas_arb`. Only bind the DS-SC5B bridges to it, as `rebind.sh` does. Binding other UAS disks would make them share the 3 slots.
 * With all 5 bays busy, each bay gets about 3/5 of the time. Fewer than 4 busy bays never wait.
+* **Disk spin-down works** with the plugin: Unraid spins idle DS-SC5B disks down normally (verified by the ~17 s spin-up delay on the next read), and a parity check carries on through a manual spin-down of all disks. The bay light goes dark while a disk is spun down.
 * Tested only with the DS-SC5B (`2109:0822` + `174c:55aa`) behind an AMD xHCI. Other cascaded-hub enclosures may have the same problem, but the right `arb_max` may differ.
 
 ## Validation
