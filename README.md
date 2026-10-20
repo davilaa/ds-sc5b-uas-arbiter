@@ -222,7 +222,7 @@ On a regular distro where `uas` is a module, you can also build the patch in-tre
 
 More detail, raw numbers and the firmware notes are in [docs/investigation.md](docs/investigation.md).
 
-## Caveats
+## Limitations and notes
 
 * **Heavy writes are not yet stress-tested.** Light concurrent writes (containers running during the parity check) were error-free. Rebuilds and parity *syncs* write heavily.
 * The arbiter is **global**: it counts every device bound to `uas_arb`. Only bind the DS-SC5B bridges to it, as `rebind.sh` does. Binding other UAS disks would make them share the 3 slots.
