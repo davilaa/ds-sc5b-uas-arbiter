@@ -85,7 +85,7 @@ insmod uas_arb.ko arb_max=3 arb_slice_ms=100 && bash rebind.sh
 **Unraid upgrades:** the module only loads if its vermagic matches the running kernel. After an upgrade the `go` snippet skips it (logged as `uas_arb: skipped …`) and the drives stay on the stock driver, so **rebuild** for the new kernel. The built-in `uas` is never disabled, so the drives always have a driver.
 
 > [!NOTE]
-> **Status: experimental, but working.** It runs on Unraid 7.2.2 (kernel 6.12.54-Unraid) with 5 array drives in a DS-SC5B. Parity checks run with **0 UAS aborts and 0 resets** at about **149 MB/s**. A full 27 TB parity check is in progress (see [Validation](#validation)). Modules are built automatically for each new Unraid release (7.0 and later). Use at your own risk; this is an unofficial kernel module.
+> **Status: experimental, but working.** It runs on Unraid 7.2.2 (kernel 6.12.54-Unraid) with 5 array drives in a DS-SC5B. Parity checks run with **0 UAS aborts and 0 resets** at about **149 MB/s**. A full 27.3 TB parity check **completed with 0 sync errors and 0 UAS aborts/resets from the arbiter** (see [Validation](#validation)). Modules are built automatically for each new Unraid release (7.0 and later). Use at your own risk; this is an unofficial kernel module.
 
 ---
 
@@ -234,9 +234,9 @@ More detail, raw numbers and the firmware notes are in [docs/investigation.md](d
 
 * [x] fio read matrix and 10-minute soak (Ubuntu 26.04, kernel 7.0)
 * [x] Unraid 6.12.54: arbiter on/off control test
-* [x] Unraid parity check (non-correcting and correcting) under load: 0 aborts, 0 resets so far
+* [x] Unraid parity check (non-correcting and correcting) under load: 0 aborts, 0 resets from the arbiter
 * [x] Code review of the arbiter and all its hooks (lock order, lifetimes, slot accounting, every release path): no correctness or safety bugs; four minor items fixed in driver 3.1, see [CHANGELOG.md](CHANGELOG.md)
-* [ ] Full 27.3 TB parity check to completion (in progress)
+* [x] **Full 27.3 TB parity check to completion** (Unraid 7.2.2, finished 2026-10-22): **0 sync errors, 0 disk errors**. 54 h of running time (Unraid's average: 143.7 MB/s), 2 d 20 h elapsed including 6 manual pauses. Ran with the array in daily use (Frigate recording 24/7, Plex, backups), `md_sync_limit` 5-15, `md_num_stripes` 32768. Peak ~160 MB/s with an idle array. The only aborts/resets in the whole run came from a short SCSI timeout left over from earlier testing (spun-down disks need ~15 s to spin up); after restoring the 30 s default there were none. Disk spin-down worked throughout.
 * [ ] Heavy write test (parity sync / rebuild)
 
 ## Repository layout
